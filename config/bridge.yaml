@@ -1,0 +1,70 @@
+tianji_marvin_teleop_bridge:
+  ros__parameters:
+    robot_ip: "192.168.1.190"
+    state_topic: "/io_teleop/joint_states"
+    command_topic: "/io_teleop/joint_cmd"
+    joint_disturbance_topic: "~/estimated_joint_disturbance"
+    left_cartesian_disturbance_topic: "~/left/estimated_cartesian_disturbance"
+    right_cartesian_disturbance_topic: "~/right/estimated_cartesian_disturbance"
+    # Tianji has not yet documented the m_EST_Cart_FN reference frames. Keep these
+    # empty until the left/right frame IDs and sign convention are confirmed.
+    left_cartesian_disturbance_frame_id: ""
+    right_cartesian_disturbance_frame_id: ""
+    alignment_diagnostics_topic: "~/alignment_status"
+    publish_rate_hz: 100.0
+    alignment_diagnostics_rate_hz: 10.0
+    feedback_timeout_sec: 0.2
+    command_timeout_sec: 0.15
+    reconnect_period_sec: 2.0
+
+    # Four independent motion gates. These safe defaults cannot send a Marvin control command.
+    allow_motion: false
+    sdk_control_compatibility_confirmed: false
+    tool_dynamics_confirmed: false
+    enabled_arms: "none"  # none, left, right, or both
+
+    subscribe_joint_commands: true
+    command_reference_timeout_sec: 0.2
+    max_command_step_rad: 0.05
+    initial_alignment_tolerance_rad: 0.05
+    alignment_required_frames: 20
+    joint_limit_tolerance_rad: 0.0001
+    # Enter a recoverable impedance hold at 0.01 rad from a URDF hard limit.
+    joint_limit_safety_margin_rad: 0.01
+    # Resume only after the target is 0.03 rad inside every enabled joint limit,
+    # realigned with the held arm, and stable for 20 consecutive frames.
+    soft_limit_release_margin_rad: 0.03
+    soft_limit_recovery_alignment_rad: 0.10
+    soft_limit_recovery_frames: 20
+    # false freezes all enabled arms, preserving dual-arm coordination.
+    soft_limit_allow_other_arm_motion: false
+    max_following_error_rad: 0.25
+    mode_transition_timeout_sec: 2.0
+    # Marvin's official impedance example leaves 200 ms between control packets.
+    sdk_packet_settle_sec: 0.25
+    hold_duration_sec: 0.5
+
+    # Soft, low-stiffness starting candidates. They are never applied while allow_motion=false.
+    # K unit: N*m/deg. D is a dimensionless damping ratio.
+    left_joint_stiffness:  [2.5, 2.5, 2.5, 2.0, 1.5, 1.2, 1.0]
+    left_joint_damping:    [0.35, 0.35, 0.35, 0.30, 0.25, 0.25, 0.25]
+    right_joint_stiffness: [2.5, 2.5, 2.5, 2.0, 1.5, 1.2, 1.0]
+    right_joint_damping:   [0.35, 0.35, 0.35, 0.30, 0.25, 0.25, 0.25]
+    velocity_ratio: 10
+    acceleration_ratio: 10
+
+    # Software target slew limits, independent of the Marvin percentage limits.
+    max_command_velocity_rad_s: [0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25,
+                                 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25]
+    max_command_acceleration_rad_s2: [0.50, 0.50, 0.50, 0.50, 0.50, 0.50, 0.50,
+                                      0.50, 0.50, 0.50, 0.50, 0.50, 0.50, 0.50]
+
+    expected_sdk_version: 100343013
+    strict_sdk_version: true
+
+    # Latest command wins: depth 1 avoids replaying stale targets after scheduling delays.
+    state_qos_reliability: "reliable"
+    command_qos_reliability: "best_effort"
+    state_qos_depth: 10
+    command_qos_depth: 1
+    connect_on_start: true

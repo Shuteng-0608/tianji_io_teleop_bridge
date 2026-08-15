@@ -1,0 +1,72 @@
+# ROS 2 / colcon build products
+build/
+install/
+log/
+.colcon/
+
+# CMake build products
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+CTestTestfile.cmake
+Makefile
+compile_commands.json
+
+# C/C++ compiled files
+*.o
+*.obj
+*.a
+*.so
+*.so.*
+*.dll
+*.dylib
+*.exe
+
+# Python cache and local environments
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+env/
+
+# ROS runtime data
+.ros/
+*.bag
+*.bag.active
+*.db3
+*.mcap
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+.~lock.*
+
+# IDE settings
+.vscode/
+.idea/
+*.code-workspace
+
+# OS-generated files
+.DS_Store
+Thumbs.db
+
+# Vendor SDK files — do not redistribute without permission
+libMarvinSDK.so
+libMarvinSDK.so.*
+MarvinSDK/
+TJ_FX_ROBOT_CONTRL_SDK/
+
+# Local robot configuration and secrets
+.env
+.env.*
+!.env.example
+config/local/
+config/*_local.yaml
+config/*_private.yaml
