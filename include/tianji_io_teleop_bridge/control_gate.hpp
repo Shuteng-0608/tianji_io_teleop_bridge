@@ -11,8 +11,8 @@ enum class ControlState
 {
   kMonitor,
   kPreparingParameters,
-  kWaitingForAlignment,
   kConfiguringImpedance,
+  kWaitingForAlignment,
   kActive,
   kSoftLimitHold,
   kHold,
@@ -26,10 +26,10 @@ inline const char * control_state_name(ControlState state)
       return "MONITOR";
     case ControlState::kPreparingParameters:
       return "PREPARING_PARAMETERS";
-    case ControlState::kWaitingForAlignment:
-      return "WAITING_FOR_ALIGNMENT";
     case ControlState::kConfiguringImpedance:
       return "CONFIGURING_IMPEDANCE";
+    case ControlState::kWaitingForAlignment:
+      return "WAITING_FOR_ALIGNMENT";
     case ControlState::kActive:
       return "ACTIVE";
     case ControlState::kSoftLimitHold:
@@ -64,7 +64,7 @@ public:
   {
     state_ = ControlState::kWaitingForAlignment;
     aligned_frames_ = 0;
-    reason_ = "parameters confirmed; waiting for fresh aligned command";
+    reason_ = "joint impedance active; waiting for fresh aligned command";
   }
 
   bool observe_alignment(bool ready)

@@ -48,8 +48,7 @@ public:
   bool configure_joint_impedance_parameters(
     EnabledArms arms,
     const JointImpedanceSettings & settings);
-  bool enter_joint_impedance_mode(
-    EnabledArms arms, const JointArray & hold_positions_deg);
+  bool enter_joint_impedance_mode(EnabledArms arms);
   bool send_joint_targets(EnabledArms arms, const JointArray & positions_deg);
   bool request_idle(EnabledArms arms);
 

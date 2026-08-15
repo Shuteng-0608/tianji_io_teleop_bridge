@@ -80,8 +80,7 @@ bool MarvinSdkAdapter::configure_joint_impedance_parameters(
   return true;
 }
 
-bool MarvinSdkAdapter::enter_joint_impedance_mode(
-  EnabledArms arms, const JointArray & hold_positions_deg)
+bool MarvinSdkAdapter::enter_joint_impedance_mode(EnabledArms arms)
 {
   if (!connected_) {
     return fail("impedance mode requested while SDK is disconnected");
@@ -90,25 +89,20 @@ bool MarvinSdkAdapter::enter_joint_impedance_mode(
     return fail("impedance mode requested with no enabled arms");
   }
 
-  // Enter torque/joint-impedance mode while holding the latest measured position.
+  // Match Marvin's official impedance examples: this packet changes only the
+  // controller state and impedance type. Joint targets are sent separately.
   if (!OnClearSet()) {
     return fail("OnClearSet failed before impedance mode packet");
   }
   if (left_enabled(arms)) {
-    std::array<double, kArmDof> left{};
-    std::copy_n(hold_positions_deg.begin(), kArmDof, left.begin());
-    if (!OnSetJointCmdPos_A(left.data()) ||
-      !OnSetTargetState_A(ARM_STATE_TORQ) || !OnSetImpType_A(ARM_IMP_JOINT))
+    if (!OnSetTargetState_A(ARM_STATE_TORQ) || !OnSetImpType_A(ARM_IMP_JOINT))
     {
       discard_pending_packet();
       return fail("failed to stage left-arm joint-impedance mode");
     }
   }
   if (right_enabled(arms)) {
-    std::array<double, kArmDof> right{};
-    std::copy_n(hold_positions_deg.begin() + kArmDof, kArmDof, right.begin());
-    if (!OnSetJointCmdPos_B(right.data()) ||
-      !OnSetTargetState_B(ARM_STATE_TORQ) || !OnSetImpType_B(ARM_IMP_JOINT))
+    if (!OnSetTargetState_B(ARM_STATE_TORQ) || !OnSetImpType_B(ARM_IMP_JOINT))
     {
       discard_pending_packet();
       return fail("failed to stage right-arm joint-impedance mode");

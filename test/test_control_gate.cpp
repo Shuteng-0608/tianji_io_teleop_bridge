@@ -13,6 +13,8 @@ TEST(ControlGate, StartsInMonitorAndRequiresConsecutiveAlignment)
   gate.request_enable();
   EXPECT_EQ(gate.state(), bridge::ControlState::kPreparingParameters);
   EXPECT_FALSE(gate.observe_alignment(true));
+  gate.mark_configuring();
+  EXPECT_EQ(gate.state(), bridge::ControlState::kConfiguringImpedance);
   gate.mark_waiting_for_alignment();
   EXPECT_EQ(gate.state(), bridge::ControlState::kWaitingForAlignment);
   EXPECT_FALSE(gate.observe_alignment(true));
@@ -26,9 +28,9 @@ TEST(ControlGate, DoesNotAutoResumeAfterHoldOrFault)
 {
   bridge::ControlGate gate(1);
   gate.request_enable();
+  gate.mark_configuring();
   gate.mark_waiting_for_alignment();
   ASSERT_TRUE(gate.observe_alignment(true));
-  gate.mark_configuring();
   gate.mark_active();
   EXPECT_EQ(gate.state(), bridge::ControlState::kActive);
 
@@ -48,9 +50,9 @@ TEST(ControlGate, SoftLimitHoldRequiresConsecutiveRecoveryFrames)
 {
   bridge::ControlGate gate(1, 3);
   gate.request_enable();
+  gate.mark_configuring();
   gate.mark_waiting_for_alignment();
   ASSERT_TRUE(gate.observe_alignment(true));
-  gate.mark_configuring();
   gate.mark_active();
 
   gate.enter_soft_limit_hold("Joint3_R near lower limit");

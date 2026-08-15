@@ -6,10 +6,12 @@ tianji_marvin_teleop_bridge:
     joint_disturbance_topic: "~/estimated_joint_disturbance"
     left_cartesian_disturbance_topic: "~/left/estimated_cartesian_disturbance"
     right_cartesian_disturbance_topic: "~/right/estimated_cartesian_disturbance"
-    # Tianji has not yet documented the m_EST_Cart_FN reference frames. Keep these
-    # empty until the left/right frame IDs and sign convention are confirmed.
+    # Wrenches are computed at each flange by the Marvin M6 CCS 4.0 kinematics model.
+    # Keep frame IDs empty until the corresponding URDF frame names/sign convention are confirmed.
     left_cartesian_disturbance_frame_id: ""
     right_cartesian_disturbance_frame_id: ""
+    # Empty selects the validated ccs_m6_40.MvKDCfg installed with this package.
+    kinematics_config_file: ""
     alignment_diagnostics_topic: "~/alignment_status"
     publish_rate_hz: 100.0
     alignment_diagnostics_rate_hz: 10.0

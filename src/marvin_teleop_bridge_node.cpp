@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "MarvinSDK.h"
+#include "ament_index_cpp/get_package_share_directory.hpp"
 #include "diagnostic_msgs/msg/diagnostic_array.hpp"
 #include "diagnostic_msgs/msg/diagnostic_status.hpp"
 #include "diagnostic_msgs/msg/key_value.hpp"
@@ -25,6 +26,7 @@
 #include "tianji_io_teleop_bridge/control_gate.hpp"
 #include "tianji_io_teleop_bridge/disturbance_messages.hpp"
 #include "tianji_io_teleop_bridge/joint_model.hpp"
+#include "tianji_io_teleop_bridge/marvin_kinematics_adapter.hpp"
 #include "tianji_io_teleop_bridge/marvin_sdk_adapter.hpp"
 
 namespace tianji_io_teleop_bridge
@@ -71,6 +73,8 @@ public:
       "left_cartesian_disturbance_frame_id", "");
     right_cartesian_disturbance_frame_id_ = declare_parameter<std::string>(
       "right_cartesian_disturbance_frame_id", "");
+    kinematics_config_file_ = declare_parameter<std::string>(
+      "kinematics_config_file", "");
     alignment_diagnostics_topic_ = declare_parameter<std::string>(
       "alignment_diagnostics_topic", "~/alignment_status");
     publish_rate_hz_ = declare_parameter<double>("publish_rate_hz", 100.0);
@@ -136,6 +140,7 @@ public:
 
     validate_parameters();
     validate_sdk();
+    initialize_kinematics();
     enabled_arms_ = parse_enabled_arms(enabled_arms_text_);
     copy_control_arrays();
     control_gate_ = ControlGate(
@@ -326,6 +331,22 @@ private:
     RCLCPP_INFO(
       get_logger(), "Marvin SDK ABI check passed (byte_order=%d), version=%ld",
       byte_order, sdk_version);
+  }
+
+  void initialize_kinematics()
+  {
+    if (kinematics_config_file_.empty()) {
+      kinematics_config_file_ =
+        ament_index_cpp::get_package_share_directory("tianji_io_teleop_bridge") +
+        "/marvin_kinematics/ccs_m6_40.MvKDCfg";
+    }
+    if (!kinematics_.initialize(kinematics_config_file_)) {
+      throw std::runtime_error(
+              "Marvin kinematics initialization failed: " + kinematics_.last_error());
+    }
+    RCLCPP_INFO(
+      get_logger(), "Marvin dual-arm kinematics initialized from %s",
+      kinematics_config_file_.c_str());
   }
 
   static std::array<unsigned char, 4> parse_ipv4(const std::string & ip)
@@ -625,14 +646,17 @@ private:
     }
 
     for (std::size_t arm = 0; arm < 2; ++arm) {
-      CartesianDisturbance cartesian_disturbance{};
-      bool cartesian_disturbance_finite = true;
-      for (std::size_t axis = 0; axis < cartesian_disturbance.size(); ++axis) {
-        cartesian_disturbance[axis] = feedback.m_Out[arm].m_EST_Cart_FN[axis];
-        cartesian_disturbance_finite = cartesian_disturbance_finite &&
-          std::isfinite(cartesian_disturbance[axis]);
+      std::array<double, kArmDof> positions_deg{};
+      std::array<double, kArmDof> arm_joint_disturbance{};
+      for (std::size_t joint = 0; joint < kArmDof; ++joint) {
+        positions_deg[joint] = feedback.m_Out[arm].m_FB_Joint_Pos[joint];
+        arm_joint_disturbance[joint] = feedback.m_Out[arm].m_EST_Joint_Force[joint];
       }
-      if (cartesian_disturbance_finite) {
+
+      CartesianDisturbance cartesian_disturbance{};
+      if (kinematics_.joint_disturbance_to_wrench(
+          arm, positions_deg, arm_joint_disturbance, cartesian_disturbance))
+      {
         const auto & publisher = arm == 0 ?
           left_cartesian_disturbance_publisher_ : right_cartesian_disturbance_publisher_;
         const auto & frame_id = arm == 0 ?
@@ -643,8 +667,8 @@ private:
       } else {
         RCLCPP_WARN_THROTTLE(
           get_logger(), *get_clock(), 1000,
-          "Skipped non-finite Marvin %s-arm estimated Cartesian disturbance sample",
-          arm == 0 ? "left" : "right");
+          "Skipped Marvin %s-arm wrench estimate: %s",
+          arm == 0 ? "left" : "right", kinematics_.last_error().c_str());
       }
     }
   }
@@ -936,7 +960,7 @@ private:
     const bool robot_healthy = robot_healthy_for_enabled_arms(feedback);
 
     if (state == ControlState::kPreparingParameters) {
-      if (!robot_healthy || !command_fresh) {
+      if (!robot_healthy) {
         return;
       }
       if (impedance_configuration_phase_ == ImpedanceConfigurationPhase::kNone) {
@@ -958,35 +982,48 @@ private:
         return;
       }
       if (phase_age >= sdk_packet_settle_sec_ && impedance_parameters_verified(feedback)) {
-        impedance_configuration_phase_ = ImpedanceConfigurationPhase::kNone;
-        control_gate_.mark_waiting_for_alignment();
+        // Switching control mode can change robot behavior even though this packet contains
+        // no position target. Mark it engaged first so every partial failure requests idle.
+        control_engaged_ = true;
+        if (!sdk_.enter_joint_impedance_mode(enabled_arms_)) {
+          fault_and_idle("impedance mode request failed: " + sdk_.last_error());
+          return;
+        }
+        transition_started_ = now_steady;
+        impedance_configuration_phase_ = ImpedanceConfigurationPhase::kWaitingForModeEcho;
+        control_gate_.mark_configuring();
         RCLCPP_WARN(
           get_logger(),
-          "Impedance parameters confirmed; waiting for aligned target before mode switch");
+          "Impedance parameters confirmed; pure mode-switch packet sent without a joint target");
       }
       return;
     }
 
     if (state == ControlState::kWaitingForAlignment) {
-      const bool aligned = command_fresh && robot_healthy &&
+      if (!robot_healthy) {
+        begin_hold("robot error while waiting for alignment in impedance mode", feedback_rad,
+          now_steady);
+        return;
+      }
+      // Explicit enable authorizes impedance preparation independently of TeleBox availability.
+      // A missing/stale command simply keeps this state unaligned; no target is sent.
+      const bool aligned = command_fresh &&
         enabled_targets_within_margin(command, joint_limit_safety_margin_rad_) &&
         max_enabled_delta(command, feedback_rad) <= initial_alignment_tolerance_rad_;
       if (!control_gate_.observe_alignment(aligned)) {
         return;
       }
 
-      // Mode switching is the point at which control can change robot behavior. Treat it as
-      // potentially engaged before sending so every partial failure requests idle.
-      control_engaged_ = true;
-      if (!sdk_.enter_joint_impedance_mode(enabled_arms_, radians_to_degrees(feedback_rad))) {
-        fault_and_idle("impedance mode request failed: " + sdk_.last_error());
-        return;
-      }
-      transition_started_ = now_steady;
-      impedance_configuration_phase_ = ImpedanceConfigurationPhase::kWaitingForModeEcho;
-      control_gate_.mark_configuring();
+      clear_soft_limit_state();
+      // No target has been sent since the mode switch. Initialize the limiter from the latest
+      // measured pose so the first teleoperation target remains velocity/acceleration limited.
+      slew_limiter_.reset(feedback_rad);
+      last_sent_target_rad_ = feedback_rad;
+      last_control_update_ = now_steady;
+      control_gate_.mark_active();
       RCLCPP_WARN(
-        get_logger(), "Impedance mode packet sent; waiting for controller mode echo");
+        get_logger(),
+        "Alignment confirmed in joint impedance mode; teleoperation control is ACTIVE");
       return;
     }
 
@@ -995,25 +1032,16 @@ private:
         begin_hold("robot error while entering impedance mode", feedback_rad, now_steady);
         return;
       }
-      if (!command_fresh) {
-        begin_hold(
-          "joint command timed out while entering impedance mode", feedback_rad,
-          now_steady);
-        return;
-      }
       const double phase_age = std::chrono::duration<double>(
         now_steady - transition_started_).count();
       if (impedance_configuration_phase_ ==
         ImpedanceConfigurationPhase::kWaitingForModeEcho && impedance_mode_verified(feedback))
       {
-        clear_soft_limit_state();
-        slew_limiter_.reset(feedback_rad);
-        last_sent_target_rad_ = feedback_rad;
-        last_control_update_ = now_steady;
-        control_gate_.mark_active();
+        impedance_configuration_phase_ = ImpedanceConfigurationPhase::kNone;
+        control_gate_.mark_waiting_for_alignment();
         RCLCPP_WARN(
           get_logger(),
-          "Joint impedance mode confirmed; teleoperation control is ACTIVE");
+          "Joint impedance mode confirmed; no joint target sent; waiting for alignment");
         return;
       }
       if (phase_age > mode_transition_timeout_sec_) {
@@ -1189,8 +1217,7 @@ private:
     std::optional<JointArray> reference;
     const ControlState state = control_gate_.state();
     const bool motion_is_following =
-      control_engaged_ || state == ControlState::kActive ||
-      state == ControlState::kSoftLimitHold;
+      state == ControlState::kActive || state == ControlState::kSoftLimitHold;
     if (motion_is_following) {
       std::lock_guard<std::mutex> lock(data_mutex_);
       if (last_valid_command_time_.has_value() &&
@@ -1277,7 +1304,7 @@ private:
       control_gate_.request_enable();
       response->success = true;
       response->message =
-        "enable accepted; preparing impedance parameters before alignment and mode switch";
+        "enable accepted; preparing parameters, then switching mode before alignment";
       return;
     }
     response->success = false;
@@ -1589,6 +1616,7 @@ private:
   std::string right_cartesian_disturbance_topic_;
   std::string left_cartesian_disturbance_frame_id_;
   std::string right_cartesian_disturbance_frame_id_;
+  std::string kinematics_config_file_;
   std::string alignment_diagnostics_topic_;
   std::string state_qos_reliability_;
   std::string command_qos_reliability_;
@@ -1662,6 +1690,7 @@ private:
     ImpedanceConfigurationPhase::kNone};
   JointSlewLimiter slew_limiter_;
   MarvinSdkAdapter sdk_;
+  MarvinKinematicsAdapter kinematics_;
   std::mutex data_mutex_;
   std::uint64_t accepted_command_count_{0};
   std::uint64_t ignored_non_arm_count_{0};
