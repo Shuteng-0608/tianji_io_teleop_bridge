@@ -3,7 +3,8 @@ tianji_marvin_teleop_bridge:
     robot_ip: "192.168.1.190"
     state_topic: "/io_teleop/joint_states"
     command_topic: "/io_teleop/joint_cmd"
-    joint_disturbance_topic: "~/estimated_joint_disturbance"
+    # Disabled by default: no Cartesian Wrench publishers or calculations are created.
+    publish_cartesian_disturbance: false
     left_cartesian_disturbance_topic: "~/left/estimated_cartesian_disturbance"
     right_cartesian_disturbance_topic: "~/right/estimated_cartesian_disturbance"
     # Wrenches are computed at each flange by the Marvin M6 CCS 4.0 kinematics model.

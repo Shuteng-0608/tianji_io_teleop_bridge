@@ -4,11 +4,12 @@
 
 本项目完成以下工作：
 
-- 从 Marvin SDK 读取双臂 14 个关节的状态，并发布到 `/io_teleop/joint_states`；
+- 从 Marvin SDK 读取双臂 14 个关节的位置、速度和扰动估计，并在同一条
+  `/io_teleop/joint_states` 消息的 `position`/`velocity`/`effort` 中发布；
 - 订阅艾欧设备发布的 `/io_teleop/joint_cmd`，按关节名称解析双臂目标角；
 - 经过显式授权、阻抗模式确认、初始对齐和多层安全检查后，以关节阻抗模式控制机器人；
-- 发布 Marvin 的 14 关节扰动力估计；
-- 根据关节扰动力和机器人运动学模型，计算左右臂法兰处的六维等效扰动力/力矩；
+- 可选地根据关节扰动估计和运动学模型计算左右臂法兰处的六维等效力/力矩，
+  该功能默认关闭；
 - 发布控制状态和逐关节对齐诊断，并提供终端对齐面板。
 
 > **安全提示**：`config/bridge.yaml` 默认禁止所有运动。`config/bridge_both_test.yaml`
@@ -19,9 +20,10 @@
 
 ```text
 Marvin SDK feedback
-  ├─ joint position/velocity ──────────────> /io_teleop/joint_states
-  ├─ m_EST_Joint_Force ───────────────────> ~/estimated_joint_disturbance
+  ├─ joint position/velocity + m_EST_Joint_Force
+  │    └───────────────────────────────────> /io_teleop/joint_states
   └─ joint position + disturbance + model ─> ~/left|right/estimated_cartesian_disturbance
+                                            (default disabled)
 
 IO TeleXperience
   └─ /io_teleop/joint_cmd
@@ -42,11 +44,10 @@ Joint1_L ... Joint7_L, Joint1_R ... Joint7_R
 
 | 方向 | 名称 | 类型 | 默认频率 | 说明 |
 |---|---|---|---:|---|
-| 发布 | `/io_teleop/joint_states` | `sensor_msgs/msg/JointState` | 100 Hz | 双臂14关节反馈 |
+| 发布 | `/io_teleop/joint_states` | `sensor_msgs/msg/JointState` | 100 Hz | 双臂14关节反馈；`effort` 为 `m_EST_Joint_Force` |
 | 订阅 | `/io_teleop/joint_cmd` | `sensor_msgs/msg/JointState` | 艾欧约100 Hz | 双臂目标角；共享话题中的手指消息会被忽略 |
-| 发布 | `~/estimated_joint_disturbance` | `sensor_msgs/msg/JointState` | 100 Hz | `effort` 为14维 `m_EST_Joint_Force` |
-| 发布 | `~/left/estimated_cartesian_disturbance` | `geometry_msgs/msg/WrenchStamped` | 100 Hz | 左臂法兰处计算得到的等效六维扰动力 |
-| 发布 | `~/right/estimated_cartesian_disturbance` | `geometry_msgs/msg/WrenchStamped` | 100 Hz | 右臂法兰处计算得到的等效六维扰动力 |
+| 可选发布 | `~/left/estimated_cartesian_disturbance` | `geometry_msgs/msg/WrenchStamped` | 100 Hz | 左臂法兰处计算得到的等效六维扰动力；默认关闭 |
+| 可选发布 | `~/right/estimated_cartesian_disturbance` | `geometry_msgs/msg/WrenchStamped` | 100 Hz | 右臂法兰处计算得到的等效六维扰动力；默认关闭 |
 | 发布 | `~/alignment_status` | `diagnostic_msgs/msg/DiagnosticArray` | 10 Hz | 汇总状态和14个逐关节对齐状态 |
 | 发布 | `~/control_status` | `std_msgs/msg/String` | 1 Hz | 状态机、安全门、计数器和阻塞原因 |
 | 服务 | `~/enable_control` | `std_srvs/srv/SetBool` | 按需 | 显式启用或关闭控制 |
@@ -99,10 +100,20 @@ MONITOR
 
 ### 4.1 关节扰动力
 
-`~/estimated_joint_disturbance` 的 `effort` 原样发布 Marvin `m_EST_Joint_Force`，关节名称保持标准14关节顺序。
-它是控制器的关节扰动估计，不是末端力传感器测量值。
+`/io_teleop/joint_states` 在同一条消息中发布以下三个14维数组：
+
+- `position`：双臂关节角，单位 rad；
+- `velocity`：双臂关节速度，单位 rad/s；
+- `effort`：Marvin `m_EST_Joint_Force`，按相同关节名称和索引对应。
+
+三个数组统一使用 `Joint1_L ... Joint7_L, Joint1_R ... Joint7_R` 顺序，并来自同一个 Marvin
+反馈帧。这里的 `effort` 是控制器的关节扰动估计，不是电机实际反馈扭矩，也不是末端力传感器测量值。
+如果某一帧扰动估计包含非有限值，节点仍会发布该帧的名称、位置和速度，但将 `effort` 留空；不会发布部分长度的数组。
 
 ### 4.2 末端六维等效力
+
+该功能默认关闭：节点不创建左右臂 `WrenchStamped` 发布器，也不执行运动学换算。
+需要时将 `publish_cartesian_disturbance` 设为 `true` 并重启节点。
 
 机器人当前没有安装末端六维力传感器，因此左右臂 `WrenchStamped` 由以下信息计算：
 
@@ -158,7 +169,7 @@ initial_alignment_tolerance_rad: 0.25
 | `robot_ip` | `192.168.1.190` | Marvin控制器IP |
 | `state_topic` | `/io_teleop/joint_states` | 艾欧订阅的关节状态话题 |
 | `command_topic` | `/io_teleop/joint_cmd` | 艾欧发布的共享控制话题 |
-| `joint_disturbance_topic` | `~/estimated_joint_disturbance` | 关节扰动力话题 |
+| `publish_cartesian_disturbance` | `false` | 是否创建并发布左右臂末端六维力估计 |
 | `left_cartesian_disturbance_topic` | `~/left/estimated_cartesian_disturbance` | 左臂六维扰动力话题 |
 | `right_cartesian_disturbance_topic` | `~/right/estimated_cartesian_disturbance` | 右臂六维扰动力话题 |
 | `left_cartesian_disturbance_frame_id` | 空 | 左臂Wrench坐标系；确认后再填写 |
@@ -229,94 +240,247 @@ initial_alignment_tolerance_rad: 0.25
 | `expected_sdk_version` | `100343013` | 运行时要求的SDK版本 |
 | `strict_sdk_version` | `true` | 版本不一致时是否拒绝启动 |
 
-## 7. 依赖与构建
+## 7. 在新电脑上从零部署
 
-要求：
+### 7.1 环境和外部文件
 
-- Ubuntu + ROS 2 Humble；
-- C++17；
-- 天机 Marvin 控制SDK和运动学SDK；
-- `libMarvinSDK.so`、`libKine.so`、`MarvinSDK.h`、`FxRobot.h` 和 `ccs_m6_40.MvKDCfg`。
+已验证的构建环境为 Ubuntu 22.04 x86-64、ROS 2 Humble、C++17 和 Python 3.10。
+供应商的两个 `.so` 为 x86-64 ELF，因此不能直接在 ARM 工控机上使用。ROS 2 Humble
+的系统安装请按[ROS 2 Humble Ubuntu 官方文档](https://docs.ros.org/en/humble/Installation/Ubuntu-Install-Debians.html)
+完成，建议安装 `ros-humble-ros-base` 或 `ros-humble-desktop`。
 
-默认SDK目录为：
+本仓库不分发天机SDK，新电脑必须从天机获取与当前机器人版本匹配的 `DEMO_C++`
+目录。最稳妥的方式是复制完整目录；构建至少需要以下文件：
 
 ```text
-/home/stw/TJ_FX_ROBOT_CONTRL_SDK/DEMO_C++
+MarvinSDK.h  FxRobot.h  PointSet.h  FxRtCSDef.h  FxType.h  FXDG.h  FXKineCommon.h
+libMarvinSDK.so  libKine.so  ccs_m6_40.MvKDCfg
 ```
 
-可在构建时通过 `-DMARVIN_SDK_ROOT=/absolute/sdk/path` 覆盖。CMake会检查已验证的SDK库和M6 CCS 4.0
-配置文件SHA-256，避免误用ABI或模型不同的文件。供应商库和配置不会提交到本仓库，但构建时会复制到ROS安装前缀。
+当前仓库只接受以下已验证文件：
+
+| 文件 | SHA-256 |
+|---|---|
+| `libMarvinSDK.so` | `47ab2ab6e35cf899eae3978dfb50ee219e05b10f72aedd6bc9ba6a338a8b4011` |
+| `libKine.so` | `f1512f8e440b53614b8d61adc27b217cab1b97d8bb9a80e32e00c880eee73397` |
+| `ccs_m6_40.MvKDCfg` | `ce20b1a80974c3ed58cdac4973152625096c8ad93a779e5fd4108c26ce19bd52` |
+
+SDK版本或机器人型号变更时不要绕过校验，应先重新完成ABI、控制模式和运动学回归验证。
+
+### 7.2 安装构建工具
+
+ROS 2 安装完成后执行：
 
 ```bash
-cd /home/stw/tianji_ws
+sudo apt update
+sudo apt install -y \
+  git build-essential cmake \
+  python3-rosdep python3-colcon-common-extensions
+
+source /opt/ros/humble/setup.bash
+```
+
+`rosdep` 在整台电脑上只初始化一次。如果 `/etc/ros/rosdep/sources.list.d/20-default.list`
+已存在，跳过第一条：
+
+```bash
+sudo rosdep init
+rosdep update
+```
+
+### 7.3 克隆仓库并放置SDK
+
+```bash
+mkdir -p "$HOME/tianji_ws/src" "$HOME/tianji_vendor"
+git clone https://github.com/Shuteng-0608/tianji_io_teleop_bridge.git \
+  "$HOME/tianji_ws/src/tianji_io_teleop_bridge"
+
+# 将供应商的完整 DEMO_C++ 目录复制到新电脑后，指向它：
+export MARVIN_SDK_ROOT="$HOME/tianji_vendor/TJ_FX_ROBOT_CONTRL_SDK/DEMO_C++"
+```
+
+确认架构和校验值：
+
+```bash
+file "$MARVIN_SDK_ROOT/libMarvinSDK.so" "$MARVIN_SDK_ROOT/libKine.so"
+
+cd "$MARVIN_SDK_ROOT"
+sha256sum libMarvinSDK.so libKine.so ccs_m6_40.MvKDCfg
+```
+
+`file` 应显示 `ELF 64-bit ... x86-64`，三个校验值应与上表一致。
+
+### 7.4 安装ROS依赖并构建
+
+如果终端处在 Conda 环境中，建议先执行 `conda deactivate`，避免 CMake 选中 Conda Python。
+
+```bash
+cd "$HOME/tianji_ws"
 source /opt/ros/humble/setup.bash
 
-rosdep install --from-paths src --ignore-src -r -y
+rosdep install \
+  --from-paths src \
+  --ignore-src \
+  --rosdistro humble \
+  -r -y
 
 colcon build \
   --packages-select tianji_io_teleop_bridge \
   --symlink-install \
-  --cmake-args -DPython3_EXECUTABLE=/usr/bin/python3
+  --cmake-args \
+    -DMARVIN_SDK_ROOT="$MARVIN_SDK_ROOT" \
+    -DPython3_EXECUTABLE=/usr/bin/python3
 
-source install/setup.bash
+source "$HOME/tianji_ws/install/setup.bash"
+ros2 pkg executables tianji_io_teleop_bridge
 ```
 
-## 8. 使用方法
-
-### 8.1 不连接机器人，仅检查ROS节点
+CMake会检查SDK文件完整性和SHA-256，构建时将运行所需的 `.so` 和机型配置复制到
+`install/`。以后每个新终端至少需要：
 
 ```bash
+source /opt/ros/humble/setup.bash
+source "$HOME/tianji_ws/install/setup.bash"
+```
+
+### 7.5 网络和DDS发现
+
+使用额外电脑时，将机器人主控、该电脑和TeleBox可变IP网口接入同一交换机。
+三者必须使用同一子网内互不冲突的静态IP。例如机器人为 `192.168.1.190/24`时，
+电脑可设为未占用的 `192.168.1.x/24`；不要盲目照搬示例地址，TeleBox IP以艾欧配置为准。
+
+```bash
+ip -br address
+ip route get 192.168.1.190
+ping -c 3 192.168.1.190
+```
+
+ROS 2 DDS 还要求本机与TeleBox使用相同的 `ROS_DOMAIN_ID`、允许多播/本地UDP通信，且
+`ROS_LOCALHOST_ONLY` 不能为 `1`。若艾欧未指定域，双方都不设置 `ROS_DOMAIN_ID` 即使用默认域0。
+艾欧的网络与话题规约可参考
+[TeleXperience 机器人适配文档](https://io-ai.tech/telexperience/docs/AdaptationRequirements/)。
+
+```bash
+printenv ROS_DOMAIN_ID ROS_LOCALHOST_ONLY
+ros2 node list
+ros2 topic info -v /io_teleop/joint_cmd
+```
+
+`ping` 失败也可能是对端禁用ICMP；最终以SDK连接日志和ROS 2端点发现结果为准。
+
+## 8. 配置、验收与启动
+
+### 8.1 准备本机配置
+
+不要直接把实机私有参数提交到仓库。从安全默认配置复制一份本机配置：
+
+```bash
+mkdir -p "$HOME/tianji_config"
+cp "$HOME/tianji_ws/src/tianji_io_teleop_bridge/config/bridge.yaml" \
+  "$HOME/tianji_config/bridge_robot.yaml"
+```
+
+至少确认 `robot_ip`、`enabled_arms`、阻抗参数、关节限速和两个人工确认门。
+末端六维力估计当前保持 `publish_cartesian_disturbance: false`。
+
+### 8.2 阶段A：不连接机器人的ROS自检
+
+```bash
+source /opt/ros/humble/setup.bash
+source "$HOME/tianji_ws/install/setup.bash"
+
 ros2 launch tianji_io_teleop_bridge marvin_teleop_bridge.launch.py \
+  config_file:="$HOME/tianji_config/bridge_robot.yaml" \
   connect_on_start:=false \
   allow_motion:=false
 ```
 
-### 8.2 连接机器人，只读取状态
-
-Marvin SDK连接是独占的，启动前关闭 MarvinPlatform 和其他SDK客户端。
-
-```bash
-ros2 launch tianji_io_teleop_bridge marvin_teleop_bridge.launch.py \
-  config_file:=/home/stw/tianji_ws/src/tianji_io_teleop_bridge/config/bridge.yaml \
-  allow_motion:=false
-```
-
-检查状态和扰动力：
-
-```bash
-ros2 topic hz /io_teleop/joint_states
-ros2 topic echo /io_teleop/joint_states --once
-
-ros2 topic echo \
-  /tianji_marvin_teleop_bridge/estimated_joint_disturbance \
-  --qos-depth 100 --once
-
-ros2 topic echo \
-  /tianji_marvin_teleop_bridge/left/estimated_cartesian_disturbance \
-  --qos-depth 100 --once
-
-ros2 topic echo \
-  /tianji_marvin_teleop_bridge/right/estimated_cartesian_disturbance \
-  --qos-depth 100 --once
-```
-
-### 8.3 双臂阻抗遥操作联调
-
-确保机器人、工控机和TeleBox网络互通，机器人工作区清空，物理急停可立即触达。然后启动：
-
-```bash
-ros2 launch tianji_io_teleop_bridge marvin_teleop_bridge.launch.py \
-  config_file:=/home/stw/tianji_ws/src/tianji_io_teleop_bridge/config/bridge_both_test.yaml \
-  allow_motion:=true
-```
-
-另开终端观察状态：
+另开终端检查接口：
 
 ```bash
 source /opt/ros/humble/setup.bash
-source /home/stw/tianji_ws/install/setup.bash
+source "$HOME/tianji_ws/install/setup.bash"
+
+ros2 node info /tianji_marvin_teleop_bridge
+ros2 param get /tianji_marvin_teleop_bridge allow_motion
+ros2 param get /tianji_marvin_teleop_bridge publish_cartesian_disturbance
+```
+
+预期两个参数均为 `false`，且ROS图中不出现独立关节扰动话题或左右臂
+`estimated_cartesian_disturbance` 话题。
+
+### 8.3 阶段B：连接机器人，仅发布状态
+
+Marvin SDK连接是独占的，启动前关闭 MarvinPlatform 和其他SDK客户端。机器人工作区仍应清空，
+但此阶段必须保持 `allow_motion:=false`。
+
+```bash
+ros2 launch tianji_io_teleop_bridge marvin_teleop_bridge.launch.py \
+  config_file:="$HOME/tianji_config/bridge_robot.yaml" \
+  allow_motion:=false
+```
+
+另开终端验证：
+
+```bash
+source /opt/ros/humble/setup.bash
+source "$HOME/tianji_ws/install/setup.bash"
+
+ros2 topic hz /io_teleop/joint_states
+ros2 topic echo /io_teleop/joint_states --once
+ros2 topic echo /io_teleop/joint_states --field effort --once
+```
+
+`name`、`position`、`velocity`、`effort` 应都为14项，并且逐索引对应：
+
+```text
+0..6   Joint1_L .. Joint7_L
+7..13  Joint1_R .. Joint7_R
+```
+
+### 8.4 阶段C：确认TeleBox的14关节指令
+
+在不开启机器人运动的情况下，可以先确认艾欧话题、名称和频率：
+
+```bash
+ros2 topic info -v /io_teleop/joint_cmd
+
+ros2 topic echo /io_teleop/joint_cmd \
+  --qos-reliability best_effort \
+  --filter 'len(m.name) == 14 and set(m.name) == {"Joint1_L","Joint2_L","Joint3_L","Joint4_L","Joint5_L","Joint6_L","Joint7_L","Joint1_R","Joint2_R","Joint3_R","Joint4_R","Joint5_R","Joint6_R","Joint7_R"}' \
+  --once
+
+ros2 topic hz /io_teleop/joint_cmd \
+  --filter 'len(m.name) == 14 and set(m.name) == {"Joint1_L","Joint2_L","Joint3_L","Joint4_L","Joint5_L","Joint6_L","Joint7_L","Joint1_R","Joint2_R","Joint3_R","Joint4_R","Joint5_R","Joint6_R","Joint7_R"}'
+```
+
+共享话题中可能同时有手指消息，因此总话题频率不等于14关节手臂指令频率。
+如果使用 `--field position`，过滤表达式中的 `m` 已经是位置数组，不能再访问 `m.name`。
+
+### 8.5 阶段D：双臂阻抗遥操作联调
+
+> 这一阶段会让机器人进入关节阻抗模式并在对齐后执行TeleBox目标。必须清空工作区、
+> 确认工具/负载参数、准备物理急停，并由熟悉天机控制器的人员在场。
+
+将 `bridge_both_test.yaml` 复制到本机配置目录，核对 `robot_ip`、机器人版本、负载和所有限制后启动：
+
+```bash
+cp "$HOME/tianji_ws/src/tianji_io_teleop_bridge/config/bridge_both_test.yaml" \
+  "$HOME/tianji_config/bridge_both_test.yaml"
+
+ros2 launch tianji_io_teleop_bridge marvin_teleop_bridge.launch.py \
+  config_file:="$HOME/tianji_config/bridge_both_test.yaml" \
+  allow_motion:=true
+```
+
+另开终端观察状态和对齐面板：
+
+```bash
+source /opt/ros/humble/setup.bash
+source "$HOME/tianji_ws/install/setup.bash"
 
 ros2 topic echo /tianji_marvin_teleop_bridge/control_status
+ros2 run tianji_io_teleop_bridge alignment_dashboard
 ```
 
 显式启用控制：
@@ -328,21 +492,11 @@ ros2 service call \
   "{data: true}"
 ```
 
-启用后无需TeleBox指令即可配置参数并进入关节阻抗模式；节点会停在 `WAITING_FOR_ALIGNMENT`，且不发送位置目标。
-打开对齐面板，让操作端目标与机器人反馈对齐：
+调用成功后会配置阻抗参数并切换为关节阻抗模式，但在对齐完成前不会发送位置目标。
+对齐面板中绿色 `ALIGNED` 表示已进入容差，红色 `ADJUST` 需调整操作端，黄色 `LIMIT`
+表示目标进入关节限位安全裕量，灰色 `OFF` 表示该臂未启用。
 
-```bash
-ros2 run tianji_io_teleop_bridge alignment_dashboard
-```
-
-面板含义：
-
-- 绿色 `ALIGNED`：启用关节已经进入对齐容差；
-- 红色 `ADJUST`：需要调整操作端关节；
-- 黄色 `LIMIT`：目标进入URDF关节限位安全裕量；
-- 灰色 `OFF`：该手臂未启用。
-
-正常日志顺序为：
+正常日志顺序：
 
 ```text
 Impedance parameter packet sent; robot control mode is unchanged
@@ -351,9 +505,7 @@ Joint impedance mode confirmed; no joint target sent; waiting for alignment
 Alignment confirmed in joint impedance mode; teleoperation control is ACTIVE
 ```
 
-只有最后一行出现后，节点才开始发送艾欧目标。
-
-关闭控制：
+只有最后一行出现后，节点才开始发送艾欧目标。关闭控制：
 
 ```bash
 ros2 service call \
@@ -363,6 +515,35 @@ ros2 service call \
 ```
 
 ## 9. 诊断与常见问题
+
+### `MARVIN_SDK_ROOT is unset` 或SDK文件缺失
+
+重新确认 `MARVIN_SDK_ROOT` 指向包含 `.h`、`.so` 和 `ccs_m6_40.MvKDCfg` 的同一个
+`DEMO_C++` 目录，然后使用 `-DMARVIN_SDK_ROOT="$MARVIN_SDK_ROOT"` 重新构建。
+
+### SDK checksum mismatch
+
+本地SDK与已验证版本不同。不要为了通过构建而直接替换CMake中的校验值；先与天机确认
+SDK、控制器系统版本和M6 CCS 4.0机型配置是否匹配。
+
+### `Package 'tianji_io_teleop_bridge' not found`
+
+当前终端没有加载工作空间：
+
+```bash
+source /opt/ros/humble/setup.bash
+source "$HOME/tianji_ws/install/setup.bash"
+```
+
+### 看不到TeleBox节点或 `/io_teleop/joint_cmd`
+
+按顺序检查交换机物理链路、静态IP/子网掩码、`ROS_DOMAIN_ID`、`ROS_LOCALHOST_ONLY`、本机防火墙和
+DDS多播。`ros2 topic info -v /io_teleop/joint_cmd` 应能显示艾欧发布端。
+
+### 旧话题仍然存在或同名节点出现多次
+
+通常是旧版节点仍在运行。停止所有旧进程，在新终端重新 `source` 工作空间后再启动。
+默认配置下，独立关节扰动话题和左右臂末端 `WrenchStamped` 话题都不应出现。
 
 ### `refused: allow_motion is false`
 
@@ -400,15 +581,16 @@ SDK前一个设置包可能仍在处理。节点会按 `sdk_packet_settle_sec` �
 ## 10. 测试
 
 ```bash
-cd /home/stw/tianji_ws
+cd "$HOME/tianji_ws"
 source /opt/ros/humble/setup.bash
-source install/setup.bash
+source "$HOME/tianji_ws/install/setup.bash"
 
 colcon test --packages-select tianji_io_teleop_bridge
 colcon test-result --test-result-base build/tianji_io_teleop_bridge/test_results --verbose
 ```
 
-测试覆盖关节名称映射、单位换算、输入拒绝、限位与恢复滞回、速度/加速度限制、控制状态门、扰动力消息映射，
+测试覆盖关节名称映射、position/velocity/effort逐索引对应、单位换算、输入拒绝、限位与恢复滞回、
+速度/加速度限制、控制状态门、扰动力消息映射，
 以及左右臂运动学的 `tau ↔ wrench` 回归验证。
 
 ## 11. 项目结构

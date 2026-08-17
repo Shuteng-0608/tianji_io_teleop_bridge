@@ -63,8 +63,6 @@ public:
       "state_topic", "/io_teleop/joint_states");
     command_topic_ = declare_parameter<std::string>(
       "command_topic", "/io_teleop/joint_cmd");
-    joint_disturbance_topic_ = declare_parameter<std::string>(
-      "joint_disturbance_topic", "~/estimated_joint_disturbance");
     left_cartesian_disturbance_topic_ = declare_parameter<std::string>(
       "left_cartesian_disturbance_topic", "~/left/estimated_cartesian_disturbance");
     right_cartesian_disturbance_topic_ = declare_parameter<std::string>(
@@ -75,6 +73,8 @@ public:
       "right_cartesian_disturbance_frame_id", "");
     kinematics_config_file_ = declare_parameter<std::string>(
       "kinematics_config_file", "");
+    publish_cartesian_disturbance_ = declare_parameter<bool>(
+      "publish_cartesian_disturbance", false);
     alignment_diagnostics_topic_ = declare_parameter<std::string>(
       "alignment_diagnostics_topic", "~/alignment_status");
     publish_rate_hz_ = declare_parameter<double>("publish_rate_hz", 100.0);
@@ -140,7 +140,9 @@ public:
 
     validate_parameters();
     validate_sdk();
-    initialize_kinematics();
+    if (publish_cartesian_disturbance_) {
+      initialize_kinematics();
+    }
     enabled_arms_ = parse_enabled_arms(enabled_arms_text_);
     copy_control_arrays();
     control_gate_ = ControlGate(
@@ -149,14 +151,14 @@ public:
 
     state_publisher_ = create_publisher<sensor_msgs::msg::JointState>(
       state_topic_, make_qos(state_qos_reliability_, state_qos_depth_));
-    joint_disturbance_publisher_ = create_publisher<sensor_msgs::msg::JointState>(
-      joint_disturbance_topic_, make_qos(state_qos_reliability_, state_qos_depth_));
-    left_cartesian_disturbance_publisher_ =
-      create_publisher<geometry_msgs::msg::WrenchStamped>(
-      left_cartesian_disturbance_topic_, make_qos(state_qos_reliability_, state_qos_depth_));
-    right_cartesian_disturbance_publisher_ =
-      create_publisher<geometry_msgs::msg::WrenchStamped>(
-      right_cartesian_disturbance_topic_, make_qos(state_qos_reliability_, state_qos_depth_));
+    if (publish_cartesian_disturbance_) {
+      left_cartesian_disturbance_publisher_ =
+        create_publisher<geometry_msgs::msg::WrenchStamped>(
+        left_cartesian_disturbance_topic_, make_qos(state_qos_reliability_, state_qos_depth_));
+      right_cartesian_disturbance_publisher_ =
+        create_publisher<geometry_msgs::msg::WrenchStamped>(
+        right_cartesian_disturbance_topic_, make_qos(state_qos_reliability_, state_qos_depth_));
+    }
     status_publisher_ = create_publisher<std_msgs::msg::String>(
       "~/control_status", rclcpp::QoS(1).reliable().durability_volatile());
     alignment_diagnostics_publisher_ =
@@ -197,10 +199,18 @@ public:
       get_logger(), "Publishing %s at %.1f Hz; monitoring %s with latest-sample QoS",
       state_topic_.c_str(), publish_rate_hz_, command_topic_.c_str());
     RCLCPP_INFO(
-      get_logger(),
-      "Publishing Marvin disturbance estimates on %s, %s, and %s",
-      joint_disturbance_topic_.c_str(), left_cartesian_disturbance_topic_.c_str(),
-      right_cartesian_disturbance_topic_.c_str());
+      get_logger(), "Publishing Marvin estimated joint disturbance in %s effort",
+      state_topic_.c_str());
+    if (publish_cartesian_disturbance_) {
+      RCLCPP_INFO(
+        get_logger(), "Cartesian disturbance publishing enabled on %s and %s",
+        left_cartesian_disturbance_topic_.c_str(),
+        right_cartesian_disturbance_topic_.c_str());
+    } else {
+      RCLCPP_INFO(
+        get_logger(),
+        "Cartesian disturbance publishing disabled (publish_cartesian_disturbance=false)");
+    }
   }
 
   ~MarvinTeleopBridgeNode() override
@@ -293,11 +303,15 @@ private:
     if (state_qos_depth_ <= 0 || command_qos_depth_ <= 0) {
       throw std::invalid_argument("QoS depths must be positive");
     }
-    if (state_topic_.empty() || command_topic_.empty() || alignment_diagnostics_topic_.empty() ||
-      joint_disturbance_topic_.empty() || left_cartesian_disturbance_topic_.empty() ||
-      right_cartesian_disturbance_topic_.empty())
+    if (state_topic_.empty() || command_topic_.empty() || alignment_diagnostics_topic_.empty())
     {
       throw std::invalid_argument("topic names must not be empty");
+    }
+    if (publish_cartesian_disturbance_ &&
+      (left_cartesian_disturbance_topic_.empty() || right_cartesian_disturbance_topic_.empty()))
+    {
+      throw std::invalid_argument(
+              "Cartesian disturbance topic names must not be empty when publishing is enabled");
     }
     (void)parse_ipv4(robot_ip_);
     (void)parse_enabled_arms(enabled_arms_text_);
@@ -522,8 +536,10 @@ private:
     const auto feedback_stamp = now();
     const JointArray feedback_rad = publish_feedback(feedback, feedback_stamp);
     update_control(feedback, feedback_rad, now_steady);
-    // Keep the existing control path ahead of the additional telemetry serialization.
-    publish_disturbance_estimates(feedback, feedback_stamp);
+    if (publish_cartesian_disturbance_) {
+      // Keep the existing control path ahead of the optional telemetry serialization.
+      publish_cartesian_disturbance_estimates(feedback, feedback_stamp);
+    }
     publish_status_if_due(now_steady);
   }
 
@@ -599,22 +615,31 @@ private:
 
   JointArray publish_feedback(const DCSS & feedback, const rclcpp::Time & stamp)
   {
-    sensor_msgs::msg::JointState message;
-    message.header.stamp = stamp;
-    message.name.assign(joint_names().begin(), joint_names().end());
-    message.position.resize(kJointCount);
-    message.velocity.resize(kJointCount);
-
     JointArray positions_rad{};
+    JointArray velocities_rad_s{};
+    JointArray joint_disturbance{};
+    bool joint_disturbance_finite = true;
     for (std::size_t joint = 0; joint < kArmDof; ++joint) {
       positions_rad[joint] = degrees_to_radians(feedback.m_Out[0].m_FB_Joint_Pos[joint]);
       positions_rad[kArmDof + joint] = degrees_to_radians(
         feedback.m_Out[1].m_FB_Joint_Pos[joint]);
-      message.position[joint] = positions_rad[joint];
-      message.position[kArmDof + joint] = positions_rad[kArmDof + joint];
-      message.velocity[joint] = degrees_to_radians(feedback.m_Out[0].m_FB_Joint_Vel[joint]);
-      message.velocity[kArmDof + joint] = degrees_to_radians(
+      velocities_rad_s[joint] = degrees_to_radians(
+        feedback.m_Out[0].m_FB_Joint_Vel[joint]);
+      velocities_rad_s[kArmDof + joint] = degrees_to_radians(
         feedback.m_Out[1].m_FB_Joint_Vel[joint]);
+      joint_disturbance[joint] = feedback.m_Out[0].m_EST_Joint_Force[joint];
+      joint_disturbance[kArmDof + joint] = feedback.m_Out[1].m_EST_Joint_Force[joint];
+      joint_disturbance_finite = joint_disturbance_finite &&
+        std::isfinite(joint_disturbance[joint]) &&
+        std::isfinite(joint_disturbance[kArmDof + joint]);
+    }
+    const auto message = make_joint_feedback_message(
+      positions_rad, velocities_rad_s, joint_disturbance, stamp, joint_disturbance_finite);
+    if (!joint_disturbance_finite) {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 1000,
+        "Published Marvin joint state without effort because estimated disturbance was "
+        "non-finite");
     }
     {
       std::lock_guard<std::mutex> lock(data_mutex_);
@@ -625,26 +650,9 @@ private:
     return positions_rad;
   }
 
-  void publish_disturbance_estimates(const DCSS & feedback, const rclcpp::Time & stamp)
+  void publish_cartesian_disturbance_estimates(
+    const DCSS & feedback, const rclcpp::Time & stamp)
   {
-    JointArray joint_disturbance{};
-    bool joint_disturbance_finite = true;
-    for (std::size_t joint = 0; joint < kArmDof; ++joint) {
-      joint_disturbance[joint] = feedback.m_Out[0].m_EST_Joint_Force[joint];
-      joint_disturbance[kArmDof + joint] = feedback.m_Out[1].m_EST_Joint_Force[joint];
-      joint_disturbance_finite = joint_disturbance_finite &&
-        std::isfinite(joint_disturbance[joint]) &&
-        std::isfinite(joint_disturbance[kArmDof + joint]);
-    }
-    if (joint_disturbance_finite) {
-      joint_disturbance_publisher_->publish(
-        make_joint_disturbance_message(joint_disturbance, stamp));
-    } else {
-      RCLCPP_WARN_THROTTLE(
-        get_logger(), *get_clock(), 1000,
-        "Skipped non-finite Marvin estimated joint disturbance sample");
-    }
-
     for (std::size_t arm = 0; arm < 2; ++arm) {
       std::array<double, kArmDof> positions_deg{};
       std::array<double, kArmDof> arm_joint_disturbance{};
@@ -1611,7 +1619,6 @@ private:
   std::string robot_ip_;
   std::string state_topic_;
   std::string command_topic_;
-  std::string joint_disturbance_topic_;
   std::string left_cartesian_disturbance_topic_;
   std::string right_cartesian_disturbance_topic_;
   std::string left_cartesian_disturbance_frame_id_;
@@ -1645,6 +1652,7 @@ private:
   bool connect_on_start_{true};
   bool subscribe_joint_commands_{true};
   bool strict_sdk_version_{true};
+  bool publish_cartesian_disturbance_{false};
   bool soft_limit_allow_other_arm_motion_{false};
   bool allow_motion_{false};
   bool sdk_control_compatibility_confirmed_{false};
@@ -1699,7 +1707,6 @@ private:
   std::string soft_limit_trigger_detail_;
 
   rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr state_publisher_;
-  rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_disturbance_publisher_;
   rclcpp::Publisher<geometry_msgs::msg::WrenchStamped>::SharedPtr
     left_cartesian_disturbance_publisher_;
   rclcpp::Publisher<geometry_msgs::msg::WrenchStamped>::SharedPtr

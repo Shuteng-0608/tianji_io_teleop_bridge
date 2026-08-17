@@ -14,14 +14,21 @@ namespace tianji_io_teleop_bridge
 
 using CartesianDisturbance = std::array<double, 6>;
 
-inline sensor_msgs::msg::JointState make_joint_disturbance_message(
+inline sensor_msgs::msg::JointState make_joint_feedback_message(
+  const JointArray & positions,
+  const JointArray & velocities,
   const JointArray & joint_disturbance,
-  const builtin_interfaces::msg::Time & stamp)
+  const builtin_interfaces::msg::Time & stamp,
+  bool include_effort = true)
 {
   sensor_msgs::msg::JointState message;
   message.header.stamp = stamp;
   message.name.assign(joint_names().begin(), joint_names().end());
-  message.effort.assign(joint_disturbance.begin(), joint_disturbance.end());
+  message.position.assign(positions.begin(), positions.end());
+  message.velocity.assign(velocities.begin(), velocities.end());
+  if (include_effort) {
+    message.effort.assign(joint_disturbance.begin(), joint_disturbance.end());
+  }
   return message;
 }
 

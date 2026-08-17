@@ -17,9 +17,9 @@ find_package(std_srvs REQUIRED)
 
 set(
   MARVIN_SDK_ROOT
-  "/home/stw/TJ_FX_ROBOT_CONTRL_SDK/DEMO_C++"
+  "$ENV{MARVIN_SDK_ROOT}"
   CACHE PATH
-  "Directory containing the compatible MarvinSDK headers and libMarvinSDK.so"
+  "Directory containing the validated Tianji Marvin SDK headers, libraries, and model file"
 )
 set(MARVIN_SDK_LIBRARY "${MARVIN_SDK_ROOT}/libMarvinSDK.so")
 set(MARVIN_SDK_HEADER "${MARVIN_SDK_ROOT}/MarvinSDK.h")
@@ -45,11 +45,32 @@ set(
   "Expected SHA-256 of the validated Marvin M6 CCS 4.0 kinematics configuration"
 )
 
-if(NOT EXISTS "${MARVIN_SDK_LIBRARY}" OR NOT EXISTS "${MARVIN_SDK_HEADER}" OR
-  NOT EXISTS "${MARVIN_KINEMATICS_LIBRARY}" OR
-  NOT EXISTS "${MARVIN_KINEMATICS_HEADER}" OR
-  NOT EXISTS "${MARVIN_KINEMATICS_CONFIG}")
-  message(FATAL_ERROR "Compatible Marvin SDK not found under: ${MARVIN_SDK_ROOT}")
+set(MARVIN_SDK_REQUIRED_FILES
+  MarvinSDK.h
+  FxRobot.h
+  PointSet.h
+  FxRtCSDef.h
+  FxType.h
+  FXDG.h
+  FXKineCommon.h
+  libMarvinSDK.so
+  libKine.so
+  ccs_m6_40.MvKDCfg
+)
+set(MARVIN_SDK_MISSING_FILES "")
+foreach(MARVIN_SDK_REQUIRED_FILE IN LISTS MARVIN_SDK_REQUIRED_FILES)
+  if(NOT EXISTS "${MARVIN_SDK_ROOT}/${MARVIN_SDK_REQUIRED_FILE}")
+    list(APPEND MARVIN_SDK_MISSING_FILES "${MARVIN_SDK_REQUIRED_FILE}")
+  endif()
+endforeach()
+if(MARVIN_SDK_MISSING_FILES)
+  list(JOIN MARVIN_SDK_MISSING_FILES ", " MARVIN_SDK_MISSING_FILES_TEXT)
+  message(FATAL_ERROR
+    "Tianji Marvin SDK is incomplete or MARVIN_SDK_ROOT is unset. "
+    "Set the MARVIN_SDK_ROOT environment variable or pass "
+    "-DMARVIN_SDK_ROOT=/absolute/path/to/DEMO_C++. "
+    "Resolved directory: '${MARVIN_SDK_ROOT}'. "
+    "Missing: ${MARVIN_SDK_MISSING_FILES_TEXT}")
 endif()
 
 file(SHA256 "${MARVIN_SDK_LIBRARY}" MARVIN_SDK_ACTUAL_SHA256)

@@ -8,30 +8,49 @@ namespace tianji_io_teleop_bridge
 namespace
 {
 
-TEST(DisturbanceMessages, PreservesCanonicalJointOrderAndValues)
+TEST(DisturbanceMessages, JointFeedbackFieldsShareCanonicalJointMapping)
 {
+  JointArray positions{};
+  JointArray velocities{};
   JointArray disturbance{};
   for (std::size_t index = 0; index < disturbance.size(); ++index) {
+    positions[index] = static_cast<double>(index) + 100.25;
+    velocities[index] = static_cast<double>(index) + 200.25;
     disturbance[index] = static_cast<double>(index) + 0.25;
   }
   builtin_interfaces::msg::Time stamp;
   stamp.sec = 12;
   stamp.nanosec = 345;
 
-  const auto message = make_joint_disturbance_message(disturbance, stamp);
+  const auto message = make_joint_feedback_message(
+    positions, velocities, disturbance, stamp);
 
   ASSERT_EQ(message.name.size(), kJointCount);
+  ASSERT_EQ(message.position.size(), kJointCount);
+  ASSERT_EQ(message.velocity.size(), kJointCount);
   ASSERT_EQ(message.effort.size(), kJointCount);
-  EXPECT_TRUE(message.position.empty());
-  EXPECT_TRUE(message.velocity.empty());
-  EXPECT_EQ(message.name.front(), "Joint1_L");
-  EXPECT_EQ(message.name[kArmDof], "Joint1_R");
-  EXPECT_EQ(message.name.back(), "Joint7_R");
-  EXPECT_DOUBLE_EQ(message.effort.front(), 0.25);
-  EXPECT_DOUBLE_EQ(message.effort[kArmDof], 7.25);
-  EXPECT_DOUBLE_EQ(message.effort.back(), 13.25);
+  for (std::size_t index = 0; index < kJointCount; ++index) {
+    EXPECT_EQ(message.name[index], joint_names()[index]);
+    EXPECT_DOUBLE_EQ(message.position[index], positions[index]);
+    EXPECT_DOUBLE_EQ(message.velocity[index], velocities[index]);
+    EXPECT_DOUBLE_EQ(message.effort[index], disturbance[index]);
+  }
   EXPECT_EQ(message.header.stamp.sec, 12);
   EXPECT_EQ(message.header.stamp.nanosec, 345U);
+}
+
+TEST(DisturbanceMessages, JointFeedbackCanOmitInvalidEffortWithoutDroppingState)
+{
+  JointArray positions{};
+  JointArray velocities{};
+  JointArray disturbance{};
+  const auto message = make_joint_feedback_message(
+    positions, velocities, disturbance, builtin_interfaces::msg::Time{}, false);
+
+  EXPECT_EQ(message.name.size(), kJointCount);
+  EXPECT_EQ(message.position.size(), kJointCount);
+  EXPECT_EQ(message.velocity.size(), kJointCount);
+  EXPECT_TRUE(message.effort.empty());
 }
 
 TEST(DisturbanceMessages, MapsCartesianForceAndTorqueWithoutReordering)
