@@ -1,0 +1,34 @@
+tianji_force_estimator:
+  ros__parameters:
+    state_topic: /io_teleop/joint_states
+    estimate_topic: /tianji_force_hud/estimates
+    kinematics_config_file: ""
+    estimate_rate_hz: 100.0
+    input_timeout_sec: 0.2
+    future_tolerance_sec: 0.05
+    # Numerical quality checks, NOT robot safety thresholds or calibrated confidence.
+    jacobian_length_scale_m: 0.1
+    max_scaled_condition: 200.0
+    max_relative_residual: 0.5
+    max_force_norm: 1000.0
+    max_torque_norm: 100.0
+    # Leave false until SDK units/axes/sign have been verified with Tianji.
+    wrench_convention_confirmed: false
+    left_wrench_frame: ""
+    right_wrench_frame: ""
+
+tianji_force_hud:
+  ros__parameters:
+    estimate_topic: /tianji_force_hud/estimates
+    image_topic: /tianji_force_hud/image/compressed
+    image_rate_hz: 30.0
+    image_width: 1280
+    image_height: 720
+    jpeg_quality: 80
+    image_qos_reliability: best_effort
+    input_timeout_sec: 0.2
+    future_tolerance_sec: 0.05
+    smoothing_time_constant_sec: 0.08
+    # Signed bar display ranges only; overflow remains visible numerically.
+    force_display_range: 20.0
+    torque_display_range: 2.0

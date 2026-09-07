@@ -12,6 +12,8 @@
 - 可选地根据关节扰动估计和运动学模型计算左右臂法兰处的六维等效力/力矩，
   该功能默认关闭；
 - 发布控制状态和逐关节对齐诊断，并提供终端对齐面板。
+- 提供独立只读的双臂力估计 HUD：消费现有 `joint_states`，以30 Hz发布JPEG压缩图像；
+  不建立机器人控制连接、不改变原遥操作状态机。见 [HUD使用与验证指南](docs/FORCE_HUD.md)。
 
 > **安全提示**：`config/bridge.yaml` 默认禁止所有运动。`config/bridge_both_test.yaml`
 > 是已经打开部分人工确认门的双臂联调配置，不是无人值守生产配置。首次调试应清空机器人周围区域、
@@ -50,8 +52,8 @@ Joint1_L ... Joint7_L, Joint1_R ... Joint7_R
 |---|---|---|---:|---|
 | 发布 | `/io_teleop/joint_states` | `sensor_msgs/msg/JointState` | 默认100 Hz；联调500 Hz | 双臂14关节反馈；`effort` 为 `m_EST_Joint_Force` |
 | 订阅 | `/io_teleop/joint_cmd` | `sensor_msgs/msg/JointState` | 艾欧约100 Hz | 双臂目标角；共享话题中的手指消息会被忽略 |
-| 可选发布 | `~/left/estimated_cartesian_disturbance` | `geometry_msgs/msg/WrenchStamped` | 100 Hz | 左臂法兰处计算得到的等效六维扰动力；默认关闭 |
-| 可选发布 | `~/right/estimated_cartesian_disturbance` | `geometry_msgs/msg/WrenchStamped` | 100 Hz | 右臂法兰处计算得到的等效六维扰动力；默认关闭 |
+| 可选发布 | `~/left/estimated_cartesian_disturbance` | `geometry_msgs/msg/WrenchStamped` | 跟随 `publish_rate_hz` | 左臂法兰处计算得到的等效六维扰动力；默认关闭 |
+| 可选发布 | `~/right/estimated_cartesian_disturbance` | `geometry_msgs/msg/WrenchStamped` | 跟随 `publish_rate_hz` | 右臂法兰处计算得到的等效六维扰动力；默认关闭 |
 | 发布 | `~/alignment_status` | `diagnostic_msgs/msg/DiagnosticArray` | 10 Hz | 汇总状态和14个逐关节对齐状态 |
 | 发布 | `~/control_status` | `std_msgs/msg/String` | 1 Hz | 状态机、安全门、计数器和阻塞原因 |
 | 服务 | `~/enable_control` | `std_srvs/srv/SetBool` | 按需 | 显式启用或关闭控制 |

@@ -16,9 +16,11 @@ find_package(ament_index_cpp REQUIRED)
 find_package(diagnostic_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(rcl_interfaces REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
+find_package(Eigen3 REQUIRED)
 
 set(
   MARVIN_SDK_ROOT
@@ -120,6 +122,22 @@ set_target_properties(marvin_teleop_bridge_node PROPERTIES
 )
 
 install(TARGETS marvin_teleop_bridge_node DESTINATION lib/${PROJECT_NAME})
+
+# This executable links kinematics only: no Marvin SDK connection/control API.
+add_executable(force_hud_estimator_node
+  src/force_hud_estimator_node.cpp src/marvin_kinematics_adapter.cpp)
+target_include_directories(force_hud_estimator_node PRIVATE include "${MARVIN_SDK_ROOT}")
+target_link_directories(force_hud_estimator_node PRIVATE "${MARVIN_SDK_ROOT}")
+target_link_libraries(force_hud_estimator_node Kine Eigen3::Eigen)
+ament_target_dependencies(force_hud_estimator_node
+  ament_index_cpp diagnostic_msgs geometry_msgs rclcpp rcl_interfaces sensor_msgs)
+target_compile_options(force_hud_estimator_node PRIVATE -Wall -Wextra -Wpedantic)
+set_target_properties(force_hud_estimator_node PROPERTIES
+  BUILD_RPATH "${MARVIN_SDK_ROOT}" INSTALL_RPATH "$ORIGIN/..")
+install(TARGETS force_hud_estimator_node DESTINATION lib/${PROJECT_NAME})
+install(PROGRAMS scripts/force_hud_node.py DESTINATION lib/${PROJECT_NAME}
+  RENAME force_hud_node)
+install(FILES scripts/force_hud_core.py DESTINATION lib/${PROJECT_NAME})
 install(PROGRAMS scripts/alignment_dashboard.py
   DESTINATION lib/${PROJECT_NAME}
   RENAME alignment_dashboard
@@ -132,6 +150,19 @@ install(DIRECTORY config launch DESTINATION share/${PROJECT_NAME})
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
+  find_package(ament_cmake_pytest REQUIRED)
+  ament_add_pytest_test(test_force_hud_core test/test_force_hud_core.py
+    APPEND_ENV PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/scripts)
+  ament_add_test(test_force_hud_pipeline
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/hud_pipeline_probe.py"
+      --duration 5
+    TIMEOUT 60
+    GENERATE_RESULT_FOR_RETURN_CODE_ZERO)
+  ament_add_gtest(test_force_hud_input test/test_force_hud_input.cpp)
+  if(TARGET test_force_hud_input)
+    target_include_directories(test_force_hud_input PRIVATE include)
+    ament_target_dependencies(test_force_hud_input sensor_msgs)
+  endif()
   ament_add_gtest(test_joint_model test/test_joint_model.cpp)
   if(TARGET test_joint_model)
     target_include_directories(test_joint_model PRIVATE include)
