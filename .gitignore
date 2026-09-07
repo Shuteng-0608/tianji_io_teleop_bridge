@@ -48,7 +48,7 @@ env/
 *~
 .~lock.*
 
-# IDE settings
+# Local IDE settings (do not commit)
 .vscode/
 .idea/
 *.code-workspace

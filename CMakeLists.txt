@@ -1,6 +1,11 @@
 cmake_minimum_required(VERSION 3.16)
 project(tianji_io_teleop_bridge)
 
+# Export the exact compiler invocations for editor tooling (for example,
+# VS Code C/C++ IntelliSense). Colcon writes the database into this package's
+# build directory, so it remains a generated artifact and is not committed.
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 if(NOT CMAKE_CXX_STANDARD)
   set(CMAKE_CXX_STANDARD 17)
 endif()

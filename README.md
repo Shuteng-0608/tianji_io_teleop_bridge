@@ -8,6 +8,7 @@
   `/io_teleop/joint_states` 消息的 `position`/`velocity`/`effort` 中发布；
 - 订阅艾欧设备发布的 `/io_teleop/joint_cmd`，按关节名称解析双臂目标角；
 - 经过显式授权、阻抗模式确认、初始对齐和多层安全检查后，以关节阻抗模式控制机器人；
+- 提供独立的一键回初始姿态服务，按同一套阻抗参数和限速平滑移动，完成后退出到空闲模式；
 - 可选地根据关节扰动估计和运动学模型计算左右臂法兰处的六维等效力/力矩，
   该功能默认关闭；
 - 发布控制状态和逐关节对齐诊断，并提供终端对齐面板。
@@ -28,6 +29,9 @@ Marvin SDK feedback
 IO TeleXperience
   └─ /io_teleop/joint_cmd
        └─ name mapping → validation → alignment → slew limiting → Marvin joint target API
+
+~/move_to_initial_pose
+  └─ configured initial pose → safety checks → slew limiting → Marvin joint target API
 ```
 
 Marvin A 臂对应左臂，B 臂对应右臂。标准关节顺序为：
@@ -44,13 +48,14 @@ Joint1_L ... Joint7_L, Joint1_R ... Joint7_R
 
 | 方向 | 名称 | 类型 | 默认频率 | 说明 |
 |---|---|---|---:|---|
-| 发布 | `/io_teleop/joint_states` | `sensor_msgs/msg/JointState` | 100 Hz | 双臂14关节反馈；`effort` 为 `m_EST_Joint_Force` |
+| 发布 | `/io_teleop/joint_states` | `sensor_msgs/msg/JointState` | 默认100 Hz；联调500 Hz | 双臂14关节反馈；`effort` 为 `m_EST_Joint_Force` |
 | 订阅 | `/io_teleop/joint_cmd` | `sensor_msgs/msg/JointState` | 艾欧约100 Hz | 双臂目标角；共享话题中的手指消息会被忽略 |
 | 可选发布 | `~/left/estimated_cartesian_disturbance` | `geometry_msgs/msg/WrenchStamped` | 100 Hz | 左臂法兰处计算得到的等效六维扰动力；默认关闭 |
 | 可选发布 | `~/right/estimated_cartesian_disturbance` | `geometry_msgs/msg/WrenchStamped` | 100 Hz | 右臂法兰处计算得到的等效六维扰动力；默认关闭 |
 | 发布 | `~/alignment_status` | `diagnostic_msgs/msg/DiagnosticArray` | 10 Hz | 汇总状态和14个逐关节对齐状态 |
 | 发布 | `~/control_status` | `std_msgs/msg/String` | 1 Hz | 状态机、安全门、计数器和阻塞原因 |
 | 服务 | `~/enable_control` | `std_srvs/srv/SetBool` | 按需 | 显式启用或关闭控制 |
+| 服务 | `~/move_to_initial_pose` | `std_srvs/srv/Trigger` | 按需 | 从 `MONITOR` 异步移动到配置的初始姿态，完成后退出到IDLE |
 
 `/io_teleop/joint_cmd` 同时承载艾欧左右手手指消息：
 
@@ -63,12 +68,17 @@ Joint1_L ... Joint7_L, Joint1_R ... Joint7_R
 
 ```text
 MONITOR
-  └─ enable_control=true
+  ├─ enable_control=true
        → PREPARING_PARAMETERS
        → CONFIGURING_IMPEDANCE
        → WAITING_FOR_ALIGNMENT
        → ACTIVE ←→ SOFT_LIMIT_HOLD
                     └──────────→ HOLD → MONITOR
+  └─ move_to_initial_pose
+       → PREPARING_PARAMETERS
+       → CONFIGURING_IMPEDANCE
+       → RETURNING_TO_INITIAL_POSE
+       → HOLD → IDLE → MONITOR
        任一不可恢复错误 ───────→ FAULT
 ```
 
@@ -95,6 +105,11 @@ MONITOR
 
 目标进入关节软限位时不会立刻退出遥操作，而是进入 `SOFT_LIMIT_HOLD`：默认冻结所有启用手臂，
 目标回到更大的释放裕量、重新对齐并稳定指定帧数后自动恢复 `ACTIVE`。机器人故障和急停错误不会由本节点自动清除。
+
+`move_to_initial_pose` 与遥操作互斥，只允许从 `MONITOR` 调用。服务返回成功表示任务已被接受，
+不表示机器人已经到位。节点会先配置并确认关节阻抗模式，再从当前反馈位置开始按软件速度和加速度
+限制移动；执行期间不会跟随艾欧目标。到位并连续稳定后，节点短暂保持当前位置、请求IDLE并回到
+`MONITOR`。之后如需遥操作，仍须单独调用 `enable_control=true` 并完成对齐。
 
 ## 4. 扰动力估计
 
@@ -153,10 +168,18 @@ sdk_control_compatibility_confirmed: true
 tool_dynamics_confirmed: true
 enabled_arms: "both"
 initial_alignment_tolerance_rad: 0.25
+joint_limit_safety_margin_rad: 0.005
+soft_limit_release_margin_rad: 0.015
+publish_rate_hz: 500.0
+control_rate_hz: 100.0
 ```
 
 配置文件中的 `allow_motion` 仍为 `false`，必须在启动命令中显式传入 `allow_motion:=true` 才能开放运动能力。
 两个 `*_confirmed` 参数是人工确认标志，不会替代实际的SDK兼容性和工具负载检查。
+其中两个限位裕量和500 Hz状态发布是当前双臂联调专用设置；控制状态机及SDK目标下发仍保持
+100 Hz。安全默认配置
+`bridge.yaml` 仍使用 `0.01 rad` 和 `0.03 rad`。URDF硬限位以及
+`joint_limit_tolerance_rad` 均未放宽。
 
 ## 6. 参数说明
 
@@ -176,11 +199,16 @@ initial_alignment_tolerance_rad: 0.25
 | `right_cartesian_disturbance_frame_id` | 空 | 右臂Wrench坐标系；确认后再填写 |
 | `kinematics_config_file` | 空 | 空值使用安装包内校验过的 `ccs_m6_40.MvKDCfg` |
 | `alignment_diagnostics_topic` | `~/alignment_status` | 对齐诊断话题 |
-| `publish_rate_hz` | `100.0` | 主反馈与控制循环频率 |
+| `publish_rate_hz` | `100.0` | SDK反馈读取及 `/io_teleop/joint_states` 发布频率；允许最高1000 Hz |
+| `control_rate_hz` | `100.0` | 控制状态机及SDK目标下发频率；允许最高200 Hz且不得高于发布频率 |
 | `alignment_diagnostics_rate_hz` | `10.0` | 对齐诊断频率 |
 | `reconnect_period_sec` | `2.0` | SDK连接失败后的重试周期 |
 | `connect_on_start` | `true` | 节点启动后是否连接机器人 |
 | `subscribe_joint_commands` | `true` | 是否订阅艾欧控制话题 |
+
+状态发布和控制下发已经解耦。提高 `publish_rate_hz` 不会同步提高阻抗目标报文频率；这可避免
+500 Hz状态测试放大SDK `OnClearSet` 竞争。需要注意，高发布频率不等于控制器产生了同频率的
+独立测量帧：如果Marvin反馈帧更新较慢，ROS消息会以更高频率重复最新有效反馈。
 
 ### 显式运动门
 
@@ -213,6 +241,10 @@ initial_alignment_tolerance_rad: 0.25
 | `mode_transition_timeout_sec` | `2.0` | 参数或模式回显确认超时 |
 | `sdk_packet_settle_sec` | `0.25` | 两个SDK设置报文之间的最小稳定时间 |
 | `hold_duration_sec` | `0.5` | 进入空闲模式前的短时保持时长 |
+| `initial_pose_deg` | 14维数组 | 一键回初始姿态目标，顺序为左臂7轴后右臂7轴，单位deg |
+| `initial_pose_tolerance_rad` | `0.02` | 判定到达初始姿态的逐关节最大误差 |
+| `initial_pose_required_frames` | `20` | 到位后要求的连续稳定反馈帧数 |
+| `initial_pose_timeout_sec` | `45.0` | 回初始姿态运动阶段超时 |
 
 ### 阻抗和软件限速
 
@@ -457,7 +489,44 @@ ros2 topic hz /io_teleop/joint_cmd \
 共享话题中可能同时有手指消息，因此总话题频率不等于14关节手臂指令频率。
 如果使用 `--field position`，过滤表达式中的 `m` 已经是位置数组，不能再访问 `m.name`。
 
-### 8.5 阶段D：双臂阻抗遥操作联调
+### 8.5 可选：一键回到初始姿态
+
+> 该服务会真实控制机器人运动。调用前必须清空工作区、准备物理急停，并确认机器人能够沿路径
+> 安全运动。当前实现只约束关节目标、速度和加速度，不进行双臂或环境碰撞规划。
+
+当前双臂目标为：
+
+```text
+左臂： 90, -75, -90, -90, 0, 0, 0 deg
+右臂：-90, -75,  90, -90, 0, 0, 0 deg
+```
+
+节点必须使用 `allow_motion:=true` 启动并处于 `MONITOR`。调用：
+
+```bash
+ros2 service call \
+  /tianji_marvin_teleop_bridge/move_to_initial_pose \
+  std_srvs/srv/Trigger \
+  "{}"
+```
+
+另一个终端观察异步执行状态：
+
+```bash
+ros2 topic echo /tianji_marvin_teleop_bridge/control_status
+```
+
+正常状态顺序为：
+
+```text
+PREPARING_PARAMETERS → CONFIGURING_IMPEDANCE
+→ RETURNING_TO_INITIAL_POSE → HOLD → MONITOR
+```
+
+日志出现 `Initial pose reached ... holding briefly before requesting idle` 表示已经到位。
+如果当时正在遥操作，先调用 `enable_control=false`，等待状态回到 `MONITOR` 后再调用本服务。
+
+### 8.6 阶段D：双臂阻抗遥操作联调
 
 > 这一阶段会让机器人进入关节阻抗模式并在对齐后执行TeleBox目标。必须清空工作区、
 > 确认工具/负载参数、准备物理急停，并由熟悉天机控制器的人员在场。

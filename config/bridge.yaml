@@ -15,6 +15,8 @@ tianji_marvin_teleop_bridge:
     kinematics_config_file: ""
     alignment_diagnostics_topic: "~/alignment_status"
     publish_rate_hz: 100.0
+    # Control/SDK target packets remain at 100 Hz even if state publishing is raised.
+    control_rate_hz: 100.0
     alignment_diagnostics_rate_hz: 10.0
     feedback_timeout_sec: 0.2
     command_timeout_sec: 0.15
@@ -46,6 +48,14 @@ tianji_marvin_teleop_bridge:
     # Marvin's official impedance example leaves 200 ms between control packets.
     sdk_packet_settle_sec: 0.25
     hold_duration_sec: 0.5
+
+    # One-shot initial-pose service target, in canonical joint order and degrees:
+    # Joint1_L..Joint7_L, then Joint1_R..Joint7_R.
+    initial_pose_deg: [90.0, -75.0, -90.0, -90.0, 0.0, 0.0, 0.0,
+                       -90.0, -75.0, 90.0, -90.0, 0.0, 0.0, 0.0]
+    initial_pose_tolerance_rad: 0.02
+    initial_pose_required_frames: 20
+    initial_pose_timeout_sec: 45.0
 
     # Soft, low-stiffness starting candidates. They are never applied while allow_motion=false.
     # K unit: N*m/deg. D is a dimensionless damping ratio.

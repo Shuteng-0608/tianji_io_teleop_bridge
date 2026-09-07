@@ -23,6 +23,7 @@
 #include "sensor_msgs/msg/joint_state.hpp"
 #include "std_msgs/msg/string.hpp"
 #include "std_srvs/srv/set_bool.hpp"
+#include "std_srvs/srv/trigger.hpp"
 #include "tianji_io_teleop_bridge/control_gate.hpp"
 #include "tianji_io_teleop_bridge/disturbance_messages.hpp"
 #include "tianji_io_teleop_bridge/joint_model.hpp"
@@ -38,6 +39,26 @@ enum class ImpedanceConfigurationPhase
   kWaitingForParameterEcho,
   kWaitingForModeEcho
 };
+
+enum class ControlPurpose
+{
+  kNone,
+  kTeleoperation,
+  kInitialPose
+};
+
+inline const char * control_purpose_name(ControlPurpose purpose)
+{
+  switch (purpose) {
+    case ControlPurpose::kNone:
+      return "NONE";
+    case ControlPurpose::kTeleoperation:
+      return "TELEOPERATION";
+    case ControlPurpose::kInitialPose:
+      return "INITIAL_POSE";
+  }
+  return "UNKNOWN";
+}
 
 inline const char * impedance_phase_name(ImpedanceConfigurationPhase phase)
 {
@@ -80,6 +101,7 @@ public:
     publish_rate_hz_ = declare_parameter<double>("publish_rate_hz", 100.0);
     alignment_diagnostics_rate_hz_ = declare_parameter<double>(
       "alignment_diagnostics_rate_hz", 10.0);
+    control_rate_hz_ = declare_parameter<double>("control_rate_hz", 100.0);
     feedback_timeout_sec_ = declare_parameter<double>("feedback_timeout_sec", 0.2);
     command_timeout_sec_ = declare_parameter<double>("command_timeout_sec", 0.15);
     command_reference_timeout_sec_ = declare_parameter<double>(
@@ -100,9 +122,13 @@ public:
       "mode_transition_timeout_sec", 2.0);
     sdk_packet_settle_sec_ = declare_parameter<double>("sdk_packet_settle_sec", 0.25);
     hold_duration_sec_ = declare_parameter<double>("hold_duration_sec", 0.5);
+    initial_pose_tolerance_rad_ = declare_parameter<double>(
+      "initial_pose_tolerance_rad", 0.02);
+    initial_pose_timeout_sec_ = declare_parameter<double>("initial_pose_timeout_sec", 45.0);
     reconnect_period_sec_ = declare_parameter<double>("reconnect_period_sec", 2.0);
     alignment_required_frames_ = declare_parameter<int>("alignment_required_frames", 20);
     soft_limit_recovery_frames_ = declare_parameter<int>("soft_limit_recovery_frames", 20);
+    initial_pose_required_frames_ = declare_parameter<int>("initial_pose_required_frames", 20);
     expected_sdk_version_ = declare_parameter<int64_t>("expected_sdk_version", 100343013);
     connect_on_start_ = declare_parameter<bool>("connect_on_start", true);
     subscribe_joint_commands_ = declare_parameter<bool>("subscribe_joint_commands", true);
@@ -130,6 +156,10 @@ public:
       "max_command_velocity_rad_s", std::vector<double>(kJointCount, 0.25));
     max_acceleration_ = declare_parameter<std::vector<double>>(
       "max_command_acceleration_rad_s2", std::vector<double>(kJointCount, 0.50));
+    initial_pose_deg_ = declare_parameter<std::vector<double>>(
+      "initial_pose_deg",
+      {90.0, -75.0, -90.0, -90.0, 0.0, 0.0, 0.0,
+        -90.0, -75.0, 90.0, -90.0, 0.0, 0.0, 0.0});
 
     state_qos_reliability_ = declare_parameter<std::string>(
       "state_qos_reliability", "reliable");
@@ -175,6 +205,11 @@ public:
       std::bind(
         &MarvinTeleopBridgeNode::on_enable_control, this,
         std::placeholders::_1, std::placeholders::_2));
+    initial_pose_service_ = create_service<std_srvs::srv::Trigger>(
+      "~/move_to_initial_pose",
+      std::bind(
+        &MarvinTeleopBridgeNode::on_move_to_initial_pose, this,
+        std::placeholders::_1, std::placeholders::_2));
 
     const auto timer_period = std::chrono::duration_cast<std::chrono::nanoseconds>(
       std::chrono::duration<double>(1.0 / publish_rate_hz_));
@@ -196,8 +231,10 @@ public:
         "gates are still required");
     }
     RCLCPP_INFO(
-      get_logger(), "Publishing %s at %.1f Hz; monitoring %s with latest-sample QoS",
-      state_topic_.c_str(), publish_rate_hz_, command_topic_.c_str());
+      get_logger(),
+      "Publishing %s at %.1f Hz; control updates at %.1f Hz; monitoring %s with "
+      "latest-sample QoS",
+      state_topic_.c_str(), publish_rate_hz_, control_rate_hz_, command_topic_.c_str());
     RCLCPP_INFO(
       get_logger(), "Publishing Marvin estimated joint disturbance in %s effort",
       state_topic_.c_str());
@@ -245,8 +282,15 @@ private:
   void validate_parameters()
   {
     validate_positive_finite(publish_rate_hz_, "publish_rate_hz");
-    if (publish_rate_hz_ > 200.0) {
-      throw std::invalid_argument("publish_rate_hz must not exceed 200");
+    if (publish_rate_hz_ > 1000.0) {
+      throw std::invalid_argument("publish_rate_hz must not exceed 1000");
+    }
+    validate_positive_finite(control_rate_hz_, "control_rate_hz");
+    if (control_rate_hz_ > 200.0) {
+      throw std::invalid_argument("control_rate_hz must not exceed 200");
+    }
+    if (control_rate_hz_ > publish_rate_hz_) {
+      throw std::invalid_argument("control_rate_hz must not exceed publish_rate_hz");
     }
     validate_positive_finite(
       alignment_diagnostics_rate_hz_, "alignment_diagnostics_rate_hz");
@@ -268,6 +312,8 @@ private:
     validate_positive_finite(mode_transition_timeout_sec_, "mode_transition_timeout_sec");
     validate_positive_finite(sdk_packet_settle_sec_, "sdk_packet_settle_sec");
     validate_positive_finite(hold_duration_sec_, "hold_duration_sec");
+    validate_positive_finite(initial_pose_tolerance_rad_, "initial_pose_tolerance_rad");
+    validate_positive_finite(initial_pose_timeout_sec_, "initial_pose_timeout_sec");
     validate_positive_finite(reconnect_period_sec_, "reconnect_period_sec");
     if (!std::isfinite(joint_limit_tolerance_rad_) || joint_limit_tolerance_rad_ < 0.0 ||
       !std::isfinite(joint_limit_safety_margin_rad_) || joint_limit_safety_margin_rad_ < 0.0)
@@ -293,6 +339,9 @@ private:
     }
     if (soft_limit_recovery_frames_ <= 0) {
       throw std::invalid_argument("soft_limit_recovery_frames must be positive");
+    }
+    if (initial_pose_required_frames_ <= 0) {
+      throw std::invalid_argument("initial_pose_required_frames must be positive");
     }
     if (impedance_settings_.velocity_ratio < 1 || impedance_settings_.velocity_ratio > 100 ||
       impedance_settings_.acceleration_ratio < 1 ||
@@ -323,6 +372,17 @@ private:
     validate_vector(
       max_acceleration_, kJointCount, 1.0e-6, 50.0,
       "max_command_acceleration_rad_s2");
+    validate_vector(initial_pose_deg_, kJointCount, -360.0, 360.0, "initial_pose_deg");
+    for (std::size_t index = 0; index < kJointCount; ++index) {
+      const double position_rad = degrees_to_radians(initial_pose_deg_[index]);
+      if (position_rad < lower_limits_rad()[index] + joint_limit_safety_margin_rad_ ||
+        position_rad > upper_limits_rad()[index] - joint_limit_safety_margin_rad_)
+      {
+        throw std::invalid_argument(
+                "initial_pose_deg is outside the configured safe range for " +
+                joint_names()[index]);
+      }
+    }
   }
 
   void validate_sdk()
@@ -427,6 +487,9 @@ private:
     std::copy(max_velocity_.begin(), max_velocity_.end(), max_velocity_rad_s_.begin());
     std::copy(
       max_acceleration_.begin(), max_acceleration_.end(), max_acceleration_rad_s2_.begin());
+    std::transform(
+      initial_pose_deg_.begin(), initial_pose_deg_.end(), initial_pose_rad_.begin(),
+      [](double value) {return degrees_to_radians(value);});
   }
 
   rclcpp::QoS make_qos(const std::string & reliability, int depth) const
@@ -455,7 +518,10 @@ private:
     frames_initialized_ = false;
     frame_advanced_once_.fill(false);
     last_feedback_advance_.fill(std::chrono::steady_clock::now());
+    next_control_cycle_ = std::chrono::steady_clock::time_point{};
     control_engaged_ = false;
+    control_purpose_ = ControlPurpose::kNone;
+    initial_pose_stable_frames_ = 0;
     idle_retry_pending_ = false;
     impedance_configuration_phase_ = ImpedanceConfigurationPhase::kNone;
     clear_soft_limit_state();
@@ -535,7 +601,21 @@ private:
     report_robot_errors(feedback);
     const auto feedback_stamp = now();
     const JointArray feedback_rad = publish_feedback(feedback, feedback_stamp);
-    update_control(feedback, feedback_rad, now_steady);
+    const auto control_period =
+      std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+      std::chrono::duration<double>(1.0 / control_rate_hz_));
+    const bool control_update_due = next_control_cycle_.time_since_epoch().count() == 0 ||
+      now_steady >= next_control_cycle_;
+    if (control_update_due) {
+      if (next_control_cycle_.time_since_epoch().count() == 0) {
+        next_control_cycle_ = now_steady + control_period;
+      } else {
+        do {
+          next_control_cycle_ += control_period;
+        } while (next_control_cycle_ <= now_steady);
+      }
+      update_control(feedback, feedback_rad, now_steady);
+    }
     if (publish_cartesian_disturbance_) {
       // Keep the existing control path ahead of the optional telemetry serialization.
       publish_cartesian_disturbance_estimates(feedback, feedback_stamp);
@@ -863,11 +943,11 @@ private:
   bool send_slew_limited_target(
     const JointArray & desired, std::chrono::steady_clock::time_point now_steady)
   {
-    double dt_sec = 1.0 / publish_rate_hz_;
+    double dt_sec = 1.0 / control_rate_hz_;
     if (last_control_update_.time_since_epoch().count() != 0) {
       dt_sec = std::clamp(
         std::chrono::duration<double>(now_steady - last_control_update_).count(),
-        1.0 / (publish_rate_hz_ * 2.0), 2.0 / publish_rate_hz_);
+        1.0 / (control_rate_hz_ * 2.0), 2.0 / control_rate_hz_);
     }
     last_control_update_ = now_steady;
     const JointArray limited = slew_limiter_.update(
@@ -968,6 +1048,10 @@ private:
     const bool robot_healthy = robot_healthy_for_enabled_arms(feedback);
 
     if (state == ControlState::kPreparingParameters) {
+      if (control_purpose_ == ControlPurpose::kNone) {
+        fault_and_idle("no control purpose selected while preparing impedance parameters");
+        return;
+      }
       if (!robot_healthy) {
         return;
       }
@@ -1046,14 +1130,70 @@ private:
         ImpedanceConfigurationPhase::kWaitingForModeEcho && impedance_mode_verified(feedback))
       {
         impedance_configuration_phase_ = ImpedanceConfigurationPhase::kNone;
-        control_gate_.mark_waiting_for_alignment();
-        RCLCPP_WARN(
-          get_logger(),
-          "Joint impedance mode confirmed; no joint target sent; waiting for alignment");
+        if (control_purpose_ == ControlPurpose::kInitialPose) {
+          initial_pose_started_ = now_steady;
+          initial_pose_stable_frames_ = 0;
+          slew_limiter_.reset(feedback_rad);
+          last_sent_target_rad_ = feedback_rad;
+          last_control_update_ = now_steady;
+          control_gate_.mark_returning_to_initial_pose();
+          RCLCPP_WARN(
+            get_logger(),
+            "Joint impedance mode confirmed; moving enabled arms to the configured initial pose");
+        } else if (control_purpose_ == ControlPurpose::kTeleoperation) {
+          control_gate_.mark_waiting_for_alignment();
+          RCLCPP_WARN(
+            get_logger(),
+            "Joint impedance mode confirmed; no joint target sent; waiting for alignment");
+        } else {
+          fault_and_idle("no control purpose selected after impedance mode confirmation");
+        }
         return;
       }
       if (phase_age > mode_transition_timeout_sec_) {
         fault_and_idle("timed out waiting for joint impedance mode confirmation");
+      }
+      return;
+    }
+
+    if (state == ControlState::kReturningToInitialPose) {
+      if (!robot_healthy) {
+        begin_hold("robot reported an error while returning to initial pose", feedback_rad,
+          now_steady);
+        return;
+      }
+      if (std::chrono::duration<double>(now_steady - initial_pose_started_).count() >
+        initial_pose_timeout_sec_)
+      {
+        begin_hold("initial pose motion timed out", feedback_rad, now_steady);
+        return;
+      }
+      if (max_enabled_delta(last_sent_target_rad_, feedback_rad) > max_following_error_rad_) {
+        begin_hold(
+          "following error exceeded safety threshold while returning to initial pose",
+          feedback_rad, now_steady);
+        return;
+      }
+      if (!enabled_targets_within_margin(
+          initial_pose_rad_, joint_limit_safety_margin_rad_))
+      {
+        fault_and_idle("configured initial pose entered the joint-limit safety margin");
+        return;
+      }
+
+      const JointArray desired = hold_disabled_arms_at_feedback(initial_pose_rad_, feedback_rad);
+      if (!send_slew_limited_target(desired, now_steady)) {
+        return;
+      }
+      if (max_enabled_delta(initial_pose_rad_, feedback_rad) <= initial_pose_tolerance_rad_) {
+        ++initial_pose_stable_frames_;
+      } else {
+        initial_pose_stable_frames_ = 0;
+      }
+      if (initial_pose_stable_frames_ >=
+        static_cast<std::size_t>(initial_pose_required_frames_))
+      {
+        complete_initial_pose_motion(feedback_rad, now_steady);
       }
       return;
     }
@@ -1159,15 +1299,33 @@ private:
     std::chrono::steady_clock::time_point now_steady)
   {
     clear_soft_limit_state();
+    control_purpose_ = ControlPurpose::kNone;
+    initial_pose_stable_frames_ = 0;
     hold_target_rad_ = feedback_rad;
     hold_started_ = now_steady;
     control_gate_.enter_hold(reason);
     RCLCPP_ERROR(get_logger(), "Entering HOLD: %s", reason.c_str());
   }
 
+  void complete_initial_pose_motion(
+    const JointArray & feedback_rad, std::chrono::steady_clock::time_point now_steady)
+  {
+    control_purpose_ = ControlPurpose::kNone;
+    initial_pose_stable_frames_ = 0;
+    hold_target_rad_ = feedback_rad;
+    hold_started_ = now_steady;
+    control_gate_.enter_hold("initial pose reached; holding briefly before idle");
+    RCLCPP_INFO(
+      get_logger(),
+      "Initial pose reached for %d stable frames; holding briefly before requesting idle",
+      initial_pose_required_frames_);
+  }
+
   void fault_and_idle(const std::string & reason)
   {
     clear_soft_limit_state();
+    control_purpose_ = ControlPurpose::kNone;
+    initial_pose_stable_frames_ = 0;
     control_gate_.enter_fault(reason);
     impedance_configuration_phase_ = ImpedanceConfigurationPhase::kNone;
     RCLCPP_ERROR(get_logger(), "Control fault: %s", reason.c_str());
@@ -1281,6 +1439,8 @@ private:
         begin_hold("operator requested disable", feedback, std::chrono::steady_clock::now());
         response->message = "disable accepted; holding briefly before idle";
       } else {
+        control_purpose_ = ControlPurpose::kNone;
+        initial_pose_stable_frames_ = 0;
         control_gate_.disarm("operator requested disable");
         response->message = "control disabled";
       }
@@ -1309,10 +1469,50 @@ private:
     } else {
       impedance_configuration_phase_ = ImpedanceConfigurationPhase::kNone;
       clear_soft_limit_state();
+      control_purpose_ = ControlPurpose::kTeleoperation;
+      initial_pose_stable_frames_ = 0;
       control_gate_.request_enable();
       response->success = true;
       response->message =
         "enable accepted; preparing parameters, then switching mode before alignment";
+      return;
+    }
+    response->success = false;
+  }
+
+  void on_move_to_initial_pose(
+    const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+    std::shared_ptr<std_srvs::srv::Trigger::Response> response)
+  {
+    (void)request;
+    if (!allow_motion_) {
+      response->message = "refused: allow_motion is false";
+    } else if (control_gate_.state() != ControlState::kMonitor || control_engaged_) {
+      response->message =
+        "refused: control is not in MONITOR; disable teleoperation or resolve the fault first";
+    } else if (!sdk_control_compatibility_confirmed_) {
+      response->message = "refused: SDK/controller control compatibility is not confirmed";
+    } else if (!tool_dynamics_confirmed_) {
+      response->message = "refused: tool dynamics configuration is not confirmed";
+    } else if (enabled_arms_ == EnabledArms::kNone) {
+      response->message = "refused: enabled_arms is none";
+    } else if (!sdk_.connected() || !have_feedback_ ||
+      std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - last_feedback_receive_).count() >
+      feedback_timeout_sec_)
+    {
+      response->message = "refused: fresh Marvin feedback is unavailable";
+    } else if (!robot_healthy_for_enabled_arms(latest_dcss_)) {
+      response->message = "refused: an enabled arm reports an error";
+    } else {
+      impedance_configuration_phase_ = ImpedanceConfigurationPhase::kNone;
+      clear_soft_limit_state();
+      control_purpose_ = ControlPurpose::kInitialPose;
+      initial_pose_stable_frames_ = 0;
+      control_gate_.request_enable();
+      response->success = true;
+      response->message =
+        "accepted: preparing joint impedance, then moving to the configured initial pose";
       return;
     }
     response->success = false;
@@ -1601,6 +1801,8 @@ private:
       " soft_limit_frozen_arms=" << arm_mask_name(soft_limit_frozen_arms_) <<
       " soft_limit_recovery_frames=" << control_gate_.soft_limit_recovery_frames() <<
       " config_phase=" << impedance_phase_name(impedance_configuration_phase_) <<
+      " control_purpose=" << control_purpose_name(control_purpose_) <<
+      " initial_pose_stable_frames=" << initial_pose_stable_frames_ <<
       " sdk_connected=" << (sdk_.connected() ? "true" : "false") <<
       " aligned_frames=" << control_gate_.aligned_frames() <<
       " aligned_joints=" << aligned_joints << "/" << enabled_joints <<
@@ -1630,6 +1832,7 @@ private:
   std::string enabled_arms_text_;
   double publish_rate_hz_{100.0};
   double alignment_diagnostics_rate_hz_{10.0};
+  double control_rate_hz_{100.0};
   double feedback_timeout_sec_{0.2};
   double command_timeout_sec_{0.15};
   double command_reference_timeout_sec_{0.2};
@@ -1643,9 +1846,12 @@ private:
   double mode_transition_timeout_sec_{2.0};
   double sdk_packet_settle_sec_{0.25};
   double hold_duration_sec_{0.5};
+  double initial_pose_tolerance_rad_{0.02};
+  double initial_pose_timeout_sec_{45.0};
   double reconnect_period_sec_{2.0};
   int alignment_required_frames_{20};
   int soft_limit_recovery_frames_{20};
+  int initial_pose_required_frames_{20};
   int64_t expected_sdk_version_{100343013};
   int state_qos_depth_{10};
   int command_qos_depth_{1};
@@ -1668,10 +1874,12 @@ private:
   std::vector<double> right_damping_;
   std::vector<double> max_velocity_;
   std::vector<double> max_acceleration_;
+  std::vector<double> initial_pose_deg_;
   EnabledArms enabled_arms_{EnabledArms::kNone};
   JointImpedanceSettings impedance_settings_;
   JointArray max_velocity_rad_s_{};
   JointArray max_acceleration_rad_s2_{};
+  JointArray initial_pose_rad_{};
   JointArray latest_feedback_rad_{};
   JointArray last_valid_command_rad_{};
   JointArray last_sent_target_rad_{};
@@ -1686,6 +1894,8 @@ private:
   std::chrono::steady_clock::time_point next_connect_attempt_{};
   std::chrono::steady_clock::time_point transition_started_{};
   std::chrono::steady_clock::time_point hold_started_{};
+  std::chrono::steady_clock::time_point initial_pose_started_{};
+  std::chrono::steady_clock::time_point next_control_cycle_{};
   std::chrono::steady_clock::time_point last_control_update_{};
   std::chrono::steady_clock::time_point last_status_publish_{};
   std::chrono::steady_clock::time_point last_alignment_diagnostics_publish_{};
@@ -1696,6 +1906,7 @@ private:
   ControlGate control_gate_;
   ImpedanceConfigurationPhase impedance_configuration_phase_{
     ImpedanceConfigurationPhase::kNone};
+  ControlPurpose control_purpose_{ControlPurpose::kNone};
   JointSlewLimiter slew_limiter_;
   MarvinSdkAdapter sdk_;
   MarvinKinematicsAdapter kinematics_;
@@ -1704,6 +1915,7 @@ private:
   std::uint64_t ignored_non_arm_count_{0};
   std::uint64_t rejected_command_count_{0};
   int idle_retry_attempts_{0};
+  std::size_t initial_pose_stable_frames_{0};
   std::string soft_limit_trigger_detail_;
 
   rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr state_publisher_;
@@ -1716,6 +1928,7 @@ private:
     alignment_diagnostics_publisher_;
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr command_subscription_;
   rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr control_service_;
+  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr initial_pose_service_;
   rclcpp::TimerBase::SharedPtr timer_;
 };
 

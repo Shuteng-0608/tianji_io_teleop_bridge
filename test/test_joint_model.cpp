@@ -32,6 +32,23 @@ TEST(JointModel, ConvertsDegreesAndRadians)
   EXPECT_NEAR(bridge::radians_to_degrees(bridge::kPi / 2.0), 90.0, 1.0e-12);
 }
 
+TEST(JointModel, ConfiguredDualArmInitialPoseIsInsideCommissioningSafetyMargin)
+{
+  const bridge::JointArray initial_pose_rad = {
+    bridge::degrees_to_radians(90.0), bridge::degrees_to_radians(-75.0),
+    bridge::degrees_to_radians(-90.0), bridge::degrees_to_radians(-90.0),
+    0.0, 0.0, 0.0,
+    bridge::degrees_to_radians(-90.0), bridge::degrees_to_radians(-75.0),
+    bridge::degrees_to_radians(90.0), bridge::degrees_to_radians(-90.0),
+    0.0, 0.0, 0.0};
+
+  const auto limits = bridge::inspect_joint_limit_margin(initial_pose_rad, 0.005);
+  ASSERT_TRUE(limits.valid);
+  EXPECT_TRUE(limits.arm_safe[0]);
+  EXPECT_TRUE(limits.arm_safe[1]);
+  EXPECT_TRUE(bridge::within_safe_joint_limits(initial_pose_rad, 0.005));
+}
+
 TEST(JointModel, ReordersCommandByJointName)
 {
   auto message = make_valid_message();

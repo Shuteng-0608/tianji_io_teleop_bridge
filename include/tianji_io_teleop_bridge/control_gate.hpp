@@ -13,6 +13,7 @@ enum class ControlState
   kPreparingParameters,
   kConfiguringImpedance,
   kWaitingForAlignment,
+  kReturningToInitialPose,
   kActive,
   kSoftLimitHold,
   kHold,
@@ -30,6 +31,8 @@ inline const char * control_state_name(ControlState state)
       return "CONFIGURING_IMPEDANCE";
     case ControlState::kWaitingForAlignment:
       return "WAITING_FOR_ALIGNMENT";
+    case ControlState::kReturningToInitialPose:
+      return "RETURNING_TO_INITIAL_POSE";
     case ControlState::kActive:
       return "ACTIVE";
     case ControlState::kSoftLimitHold:
@@ -87,6 +90,12 @@ public:
     state_ = ControlState::kActive;
     soft_limit_recovery_frames_ = 0;
     reason_ = "control active";
+  }
+
+  void mark_returning_to_initial_pose()
+  {
+    state_ = ControlState::kReturningToInitialPose;
+    reason_ = "moving enabled arms to configured initial pose";
   }
 
   void enter_soft_limit_hold(const std::string & reason)

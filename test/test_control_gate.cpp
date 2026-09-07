@@ -46,6 +46,22 @@ TEST(ControlGate, DoesNotAutoResumeAfterHoldOrFault)
   EXPECT_EQ(gate.state(), bridge::ControlState::kMonitor);
 }
 
+TEST(ControlGate, RepresentsInitialPoseMotionExplicitly)
+{
+  bridge::ControlGate gate(1);
+  gate.request_enable();
+  gate.mark_configuring();
+  gate.mark_returning_to_initial_pose();
+
+  EXPECT_EQ(gate.state(), bridge::ControlState::kReturningToInitialPose);
+  EXPECT_STREQ(
+    bridge::control_state_name(gate.state()), "RETURNING_TO_INITIAL_POSE");
+  EXPECT_FALSE(gate.observe_alignment(true));
+
+  gate.enter_hold("initial pose reached");
+  EXPECT_EQ(gate.state(), bridge::ControlState::kHold);
+}
+
 TEST(ControlGate, SoftLimitHoldRequiresConsecutiveRecoveryFrames)
 {
   bridge::ControlGate gate(1, 3);

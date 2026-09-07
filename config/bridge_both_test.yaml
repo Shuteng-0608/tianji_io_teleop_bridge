@@ -14,7 +14,9 @@ tianji_marvin_teleop_bridge:
     # Empty selects the validated ccs_m6_40.MvKDCfg installed with this package.
     kinematics_config_file: ""
     alignment_diagnostics_topic: "~/alignment_status"
-    publish_rate_hz: 100.0
+    # High-rate feedback publishing test; control target packets stay at 100 Hz.
+    publish_rate_hz: 500.0
+    control_rate_hz: 100.0
     alignment_diagnostics_rate_hz: 10.0
     feedback_timeout_sec: 0.2
     command_timeout_sec: 0.15
@@ -32,11 +34,12 @@ tianji_marvin_teleop_bridge:
     initial_alignment_tolerance_rad: 0.25
     alignment_required_frames: 20
     joint_limit_tolerance_rad: 0.0001
-    # Enter a recoverable impedance hold at 0.01 rad from a URDF hard limit.
-    joint_limit_safety_margin_rad: 0.01
-    # Resume only after the target is 0.03 rad inside every enabled joint limit,
-    # realigned with the held arm, and stable for 20 consecutive frames.
-    soft_limit_release_margin_rad: 0.03
+    # Commissioning override: looser than bridge.yaml, while retaining a
+    # buffer inside the URDF hard limits.
+    joint_limit_safety_margin_rad: 0.005
+    # Preserve recovery hysteresis: resume only after the target is 0.015 rad
+    # inside every enabled joint limit, realigned, and stable for 20 frames.
+    soft_limit_release_margin_rad: 0.015
     soft_limit_recovery_alignment_rad: 0.10
     soft_limit_recovery_frames: 20
     # false freezes all enabled arms, preserving dual-arm coordination.
@@ -47,14 +50,22 @@ tianji_marvin_teleop_bridge:
     sdk_packet_settle_sec: 0.25
     hold_duration_sec: 0.5
 
+    # One-shot initial-pose service target, in canonical joint order and degrees:
+    # Joint1_L..Joint7_L, then Joint1_R..Joint7_R.
+    initial_pose_deg: [90.0, -75.0, -90.0, -90.0, 0.0, 0.0, 0.0,
+                       -90.0, -75.0, 90.0, -90.0, 0.0, 0.0, 0.0]
+    initial_pose_tolerance_rad: 0.02
+    initial_pose_required_frames: 20
+    initial_pose_timeout_sec: 45.0
+
     # Soft, low-stiffness starting candidates. They are never applied while allow_motion=false.
     # K unit: N*m/deg. D is a dimensionless damping ratio.
     left_joint_stiffness:  [2.5, 2.5, 2.5, 2.0, 1.5, 1.2, 1.0]
     left_joint_damping:    [0.35, 0.35, 0.35, 0.30, 0.25, 0.25, 0.25]
     right_joint_stiffness: [2.5, 2.5, 2.5, 2.0, 1.5, 1.2, 1.0]
     right_joint_damping:   [0.35, 0.35, 0.35, 0.30, 0.25, 0.25, 0.25]
-    velocity_ratio: 10
-    acceleration_ratio: 10
+    velocity_ratio: 30
+    acceleration_ratio: 30
 
     # Software target slew limits, independent of the Marvin percentage limits.
     max_command_velocity_rad_s: [0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25,
