@@ -1,0 +1,30 @@
+# Read-only direction experiment. No calibration is claimed; no robot control.
+# Unlisted parameters retain node defaults (including quality/time checks).
+tianji_force_estimator:
+  ros__parameters:
+    state_topic: /io_teleop/joint_states
+    estimate_topic: /tianji_force_hud/estimates
+    wrench_convention_confirmed: false
+    # Per-arm SDK model-base labels, NOT camera frames or published TF transforms.
+    left_wrench_frame: left_sdk_base
+    right_wrench_frame: right_sdk_base
+
+tianji_force_hud:
+  ros__parameters:
+    display_mode: ring
+    image_rate_hz: 30.0
+    force_display_range: 20.0
+    left_direction_mapping_confirmed: false
+    left_direction_preview: true
+    left_direction_frame: left_sdk_base
+    # Identity projection of SDK force axes; no task/camera rotation or sign correction.
+    left_screen_right_axis: [1.0, 0.0, 0.0]
+    left_screen_up_axis: [0.0, 1.0, 0.0]
+    left_axial_axis: [0.0, 0.0, 1.0]
+    right_direction_mapping_confirmed: false
+    right_direction_preview: true
+    right_direction_frame: right_sdk_base
+    # Identity projection, independently expressed in the right arm SDK base.
+    right_screen_right_axis: [1.0, 0.0, 0.0]
+    right_screen_up_axis: [0.0, 1.0, 0.0]
+    right_axial_axis: [0.0, 0.0, 1.0]

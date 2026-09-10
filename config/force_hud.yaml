@@ -26,9 +26,31 @@ tianji_force_hud:
     image_height: 720
     jpeg_quality: 80
     image_qos_reliability: best_effort
+    display_mode: ring  # ring (operator view) | bars (six-axis debugging)
+    ring_semantics: force  # force | contact_side (use insertion preview config)
+    lateral_display_deadzone: 0.0
+    axial_display_deadzone: 0.0
+    zero_window_sec: 1.0
+    zero_max_std: 0.3
+    ring_show_torque: false  # Optional |M| text; not a directional torque cue.
     input_timeout_sec: 0.2
     future_tolerance_sec: 0.05
     smoothing_time_constant_sec: 0.08
-    # Signed bar display ranges only; overflow remains visible numerically.
+    trend_window_sec: 0.8
+    # Ring/bar display ranges only; overflow remains visible numerically.
     force_display_range: 20.0
     torque_display_range: 2.0
+    # Fixed axes in the named wrench frame. Defaults are UNCONFIRMED placeholders.
+    # Direction needs BOTH estimator convention confirmation AND a matching mapping.
+    left_direction_mapping_confirmed: false
+    left_direction_preview: false  # Diagnostic opt-in only; see force_hud_direction_preview.yaml.
+    left_direction_frame: ""
+    left_screen_right_axis: [1.0, 0.0, 0.0]
+    left_screen_up_axis: [0.0, 1.0, 0.0]
+    left_axial_axis: [0.0, 0.0, 1.0]
+    right_direction_mapping_confirmed: false
+    right_direction_preview: false
+    right_direction_frame: ""
+    right_screen_right_axis: [1.0, 0.0, 0.0]
+    right_screen_up_axis: [0.0, 1.0, 0.0]
+    right_axial_axis: [0.0, 0.0, 1.0]

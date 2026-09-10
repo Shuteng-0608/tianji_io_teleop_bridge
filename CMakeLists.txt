@@ -153,9 +153,16 @@ if(BUILD_TESTING)
   find_package(ament_cmake_pytest REQUIRED)
   ament_add_pytest_test(test_force_hud_core test/test_force_hud_core.py
     APPEND_ENV PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/scripts)
+  ament_add_pytest_test(test_insertion_hud test/test_insertion_hud.py
+    APPEND_ENV PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/scripts)
   ament_add_test(test_force_hud_pipeline
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/hud_pipeline_probe.py"
       --duration 5
+    TIMEOUT 60
+    GENERATE_RESULT_FOR_RETURN_CODE_ZERO)
+  ament_add_test(test_insertion_hud_pipeline
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/hud_pipeline_probe.py"
+      --duration 5 --insertion
     TIMEOUT 60
     GENERATE_RESULT_FOR_RETURN_CODE_ZERO)
   ament_add_gtest(test_force_hud_input test/test_force_hud_input.cpp)

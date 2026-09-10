@@ -13,6 +13,12 @@
   该功能默认关闭；
 - 发布控制状态和逐关节对齐诊断，并提供终端对齐面板。
 - 提供独立只读的双臂力估计 HUD：消费现有 `joint_states`，以30 Hz发布JPEG压缩图像；
+  默认使用力圆环，保留六轴条形图调试模式；方向未确认时仅显示合力大小。
+  人工方向观察可使用 `config/force_hud_direction_preview.yaml`，显式显示未标定箭头，
+  不代表方向已确认；步骤与注意事项见 [HUD说明](docs/FORCE_HUD.md#未标定方向预览人工方向观察)。
+  插孔任务使用 `config/force_hud_insertion_preview.yaml`：固定任务坐标旋转、接触侧箭头、
+  轴向力大小、显示死区和分臂手动去零；当前场景人工方向验证已通过，仍保留未完整标定提示，见
+  [插孔任务视图](docs/FORCE_HUD.md#10-插孔任务视图固定孔口坐标系)。
   不建立机器人控制连接、不改变原遥操作状态机。见 [HUD使用与验证指南](docs/FORCE_HUD.md)。
 
 > **安全提示**：`config/bridge.yaml` 默认禁止所有运动。`config/bridge_both_test.yaml`

@@ -16,7 +16,7 @@ import time
 import uuid
 
 
-def run(duration=10.0, output_dir=None):
+def run(duration=10.0, output_dir=None, display_mode="ring", insertion=False):
     # Set before importing/initializing ROS; localhost + unique topics isolate the probe.
     os.environ["ROS_LOCALHOST_ONLY"] = "1"
     os.environ["ROS_DOMAIN_ID"] = str(100 + os.getpid() % 100)
@@ -27,6 +27,7 @@ def run(duration=10.0, output_dir=None):
     from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus
     from rclpy.qos import QoSProfile, ReliabilityPolicy
     from sensor_msgs.msg import CompressedImage, JointState
+    from std_srvs.srv import Trigger
 
     output = Path(output_dir or tempfile.mkdtemp(prefix="tianji_hud_probe_"))
     output.mkdir(parents=True, exist_ok=True)
@@ -114,6 +115,13 @@ def run(duration=10.0, output_dir=None):
             for item in msg.status:
                 fields = {x.key: x.value for x in item.values}
                 assert fields["convention_confirmed"] == "false"
+                if key == "display":
+                    assert fields["display_mode"] == display_mode
+                    assert fields["direction_active"] == ("true" if insertion else "false")
+                    if insertion:
+                        assert fields["ring_semantics"] == "contact_side"
+                        assert fields["direction_preview"] == "true"
+                        assert fields["arrow_visible"] == "false"  # zero synthetic force
                 for axis in ("Fx", "Fy", "Fz", "Mx", "My", "Mz"):
                     assert abs(float(fields["raw_" + axis])) < 1e-8
 
@@ -132,6 +140,20 @@ def run(duration=10.0, output_dir=None):
                 process.kill()
                 process.wait(timeout=5)
 
+    def call_zero(side="left", clear=False):
+        suffix = "/clear_force_zero" if clear else "/zero_force"
+        client = node.create_client(Trigger, prefix + "/" + side + suffix)
+        try:
+            assert client.wait_for_service(timeout_sec=3)
+            future = client.call_async(Trigger.Request())
+            deadline = time.monotonic() + 3
+            while not future.done() and time.monotonic() < deadline:
+                spin(0.02)
+            assert future.done(), "display zero service did not return"
+            return future.result()
+        finally:
+            node.destroy_client(client)
+
     try:
         estimator_args = [str(executable_dir / "force_hud_estimator_node"), "--ros-args",
                           "-r", "__node:=hud_probe_estimator", "-p", "state_topic:=" + prefix + "/input",
@@ -139,12 +161,32 @@ def run(duration=10.0, output_dir=None):
         renderer_args = [str(executable_dir / "force_hud_node"), "--ros-args",
                          "-r", "__node:=hud_probe_renderer", "-p", "estimate_topic:=" + prefix + "/estimates",
                          "-p", "image_topic:=" + prefix + "/image",
+                         "-p", "display_mode:=" + display_mode,
                          "-r", "~/display_values:=" + prefix + "/display_values"]
+        if insertion:
+            renderer_args += ["-p", "ring_semantics:=contact_side",
+                              "-p", "lateral_display_deadzone:=0.5",
+                              "-p", "axial_display_deadzone:=0.5"]
+            for side in ("left", "right"):
+                frame = side + "_synthetic_base"
+                estimator_args += ["-p", side + "_wrench_frame:=" + frame]
+                renderer_args += ["-p", side + "_direction_frame:=" + frame,
+                                  "-p", side + "_direction_preview:=true"]
+                for service in ("zero_force", "clear_force_zero"):
+                    renderer_args += ["-r", "~/" + side + "/" + service + ":=" +
+                                      prefix + "/" + side + "/" + service]
         for name, command in (("estimator", estimator_args), ("renderer", renderer_args)):
             log = (output / (name + ".log")).open("w")
             logs.append(log)
             processes.append(subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT))
-        spin(3)
+        # DDS discovery latency is variable; wait for data, not an assumed fixed delay.
+        startup_deadline = time.monotonic() + 10
+        while time.monotonic() < startup_deadline:
+            spin(0.1)
+            if (image_snapshot is not None and all(msg is not None and
+                    len(msg.status) == 2 and all(s.level == DiagnosticStatus.WARN for s in msg.status)
+                    for msg in latest.values())):
+                break
         assert all(p.poll() is None for p in processes), "child exited; inspect probe logs"
         assert_valid()
         collecting = True
@@ -153,6 +195,16 @@ def run(duration=10.0, output_dir=None):
         assert_valid()
         assert image_snapshot is not None
         cv2.imwrite(str(output / "valid.jpg"), image_snapshot)
+        if insertion:
+            assert call_zero().success
+            spin(0.1)
+            zero_stamps = {s.name: int(next(v.value for v in s.values
+                          if v.key == "display_zero_stamp_ns")) for s in latest["display"].status}
+            assert zero_stamps["left"] > 0 and zero_stamps["right"] == 0
+            assert call_zero(clear=True).success
+            spin(0.1)
+            assert all(next(v.value for v in s.values if v.key == "display_zero_stamp_ns") == "0"
+                       for s in latest["display"].status)
         mode = "invalid"
         spin(0.8)
         assert_invalid()
@@ -162,6 +214,8 @@ def run(duration=10.0, output_dir=None):
         mode = "stopped"
         spin(0.8)
         assert_invalid()
+        if insertion:
+            assert not call_zero().success
         cv2.imwrite(str(output / "stale.jpg"), image_snapshot)
         mode = "valid"
         spin(0.8)
@@ -189,10 +243,15 @@ def run(duration=10.0, output_dir=None):
         results["image_generation_to_local_receive_ms_p99"] = float(np.percentile(transport_ms, 99))
         results["mean_jpeg_bytes"] = float(np.mean(image_bytes))
         results["duration_sec"] = duration
+        results["display_mode"] = display_mode
+        results["insertion"] = insertion
         results["checks"] = ["reversed joint mapping", "zero-wrench conversion", "JPEG decode",
                              "missing effort invalidation", "input timeout", "recovery",
                              "singular pose", "future/old timestamps", "duplicate joint names",
                              "estimator death timeout", "unverified convention preserved"]
+        if insertion:
+            results["checks"] += ["contact-side preview", "manual per-arm display zero",
+                                  "clear display zero", "stale zero rejected"]
         (output / "results.json").write_text(json.dumps(results, indent=2) + "\n")
         print(json.dumps({"artifacts": str(output), **results}, indent=2), flush=True)
         assert 28.5 <= results["image"]["hz"] <= 31.5, results
@@ -214,7 +273,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--duration", type=float, default=10.0)
     parser.add_argument("--output-dir")
+    parser.add_argument("--display-mode", choices=("ring", "bars"), default="ring")
+    parser.add_argument("--insertion", action="store_true")
     args = parser.parse_args()
     if not math.isfinite(args.duration) or args.duration < 2:
         parser.error("duration must be >= 2 seconds")
-    run(args.duration, args.output_dir)
+    if args.insertion and args.display_mode != "ring":
+        parser.error("insertion requires ring display")
+    run(args.duration, args.output_dir, args.display_mode, args.insertion)

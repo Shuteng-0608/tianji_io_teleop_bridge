@@ -1,0 +1,43 @@
+# Peg-in-hole task HUD. Candidate fixed axes captured on 2026-09-10, NOT fully validated.
+# Based on user-confirmed aligned/no-contact pose, flange +Z peg axis and model gravity.
+# Provenance: docs/HOLE_REFERENCE_2026-09-10.md. Verify BOTH arms and force polarity on site.
+tianji_force_estimator:
+  ros__parameters:
+    state_topic: /io_teleop/joint_states
+    estimate_topic: /tianji_force_hud/estimates
+    wrench_convention_confirmed: false
+    left_wrench_frame: left_sdk_base
+    right_wrench_frame: right_sdk_base
+
+tianji_force_hud:
+  ros__parameters:
+    display_mode: ring
+    ring_semantics: contact_side  # arrow = negative external lateral force
+    image_topic: /tianji_force_hud/image/compressed
+    image_rate_hz: 30.0
+    force_display_range: 20.0
+    lateral_display_deadzone: 0.5  # Display only, NOT a contact/safety threshold.
+    axial_display_deadzone: 0.5
+    zero_window_sec: 1.0
+    zero_max_std: 0.3  # Per-component raw force std; cannot detect constant contact.
+
+    # Task X = hole right, Y = hole up, Z = out of hole toward robot.
+    # Base-alignment axes must be unit, orthogonal and RIGHT-HANDED.
+    # Then task_yaw rotates task axes about aligned +Z (degrees); never live wrist yaw.
+    left_direction_mapping_confirmed: false
+    left_direction_preview: true
+    left_direction_frame: left_sdk_base
+    left_screen_right_axis: [-0.010579554353, 0.0, -0.999944034949]
+    left_screen_up_axis: [-0.007500215846, -0.999971869837, 0.000079353382]
+    left_axial_axis: [-0.999915906359, 0.007500635619, 0.010579256748]
+    left_task_yaw_deg: 0.0
+    left_external_force_sign: 1.0  # Provisional: verify environment-on-peg polarity.
+
+    right_direction_mapping_confirmed: false
+    right_direction_preview: true
+    right_direction_frame: right_sdk_base
+    right_screen_right_axis: [-0.003926610247, 0.0, 0.999992290836]
+    right_screen_up_axis: [0.009006972357, 0.999959435776, 0.000035367143]
+    right_axial_axis: [-0.999951726920, 0.009007041794, -0.003926450967]
+    right_task_yaw_deg: 0.0
+    right_external_force_sign: 1.0
