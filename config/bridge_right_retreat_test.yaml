@@ -1,0 +1,26 @@
+# Dedicated real-motion commissioning profile. No TeleBox commands are subscribed.
+# After each power cycle, configure tool dynamics on the controller first.
+# Set BOTH confirmation flags true only after verifying them; they do not configure the tool.
+tianji_marvin_teleop_bridge:
+  ros__parameters:
+    robot_ip: "192.168.1.190"
+    # Commissioning: services may upload tools when motion/feedback gates pass; no startup upload.
+    # Empty path explicitly selects the bundled config/tools_cfg.json snapshot.
+    tools_config_file: "/home/stw/TJ_FX_ROBOT_CONTRL_SDK/MarvinPlatform_EN/tools_cfg.json"
+    tool_config_dry_run: false
+    tool_config_timeout_sec: 2.0
+    allow_motion: false
+    enabled_arms: "right"
+    subscribe_joint_commands: false
+    sdk_control_compatibility_confirmed: true
+    tool_dynamics_confirmed: true
+    publish_rate_hz: 100.0
+    control_rate_hz: 100.0
+    # Nominal duration for -X 100 mm, with smooth start/stop. Rate limits may lengthen it.
+    retreat_duration_sec: 10.0
+    publish_cartesian_disturbance: false
+    joint_limit_safety_margin_rad: 0.005
+    right_joint_stiffness: [2.5, 2.5, 2.5, 2.0, 1.5, 1.2, 1.0]
+    right_joint_damping: [0.35, 0.35, 0.35, 0.30, 0.25, 0.25, 0.25]
+    velocity_ratio: 50
+    acceleration_ratio: 50

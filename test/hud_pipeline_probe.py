@@ -175,6 +175,8 @@ def run(duration=10.0, output_dir=None, display_mode="ring", insertion=False):
                 for service in ("zero_force", "clear_force_zero"):
                     renderer_args += ["-r", "~/" + side + "/" + service + ":=" +
                                       prefix + "/" + side + "/" + service]
+            for service in ("zero_force", "clear_force_zero"):
+                renderer_args += ["-r", "~/both/" + service + ":=" + prefix + "/both/" + service]
         for name, command in (("estimator", estimator_args), ("renderer", renderer_args)):
             log = (output / (name + ".log")).open("w")
             logs.append(log)
@@ -205,6 +207,15 @@ def run(duration=10.0, output_dir=None, display_mode="ring", insertion=False):
             spin(0.1)
             assert all(next(v.value for v in s.values if v.key == "display_zero_stamp_ns") == "0"
                        for s in latest["display"].status)
+            assert call_zero("both").success
+            spin(0.1)
+            both_stamps = [int(next(v.value for v in s.values if v.key == "display_zero_stamp_ns"))
+                           for s in latest["display"].status]
+            assert both_stamps[0] == both_stamps[1] and both_stamps[0] > 0
+            assert call_zero("both", clear=True).success
+            spin(0.1)
+            assert all(next(v.value for v in s.values if v.key == "display_zero_stamp_ns") == "0"
+                       for s in latest["display"].status)
         mode = "invalid"
         spin(0.8)
         assert_invalid()
@@ -216,6 +227,7 @@ def run(duration=10.0, output_dir=None, display_mode="ring", insertion=False):
         assert_invalid()
         if insertion:
             assert not call_zero().success
+            assert not call_zero("both").success
         cv2.imwrite(str(output / "stale.jpg"), image_snapshot)
         mode = "valid"
         spin(0.8)
@@ -251,7 +263,8 @@ def run(duration=10.0, output_dir=None, display_mode="ring", insertion=False):
                              "estimator death timeout", "unverified convention preserved"]
         if insertion:
             results["checks"] += ["contact-side preview", "manual per-arm display zero",
-                                  "clear display zero", "stale zero rejected"]
+                                  "clear display zero", "stale zero rejected",
+                                  "both-arm zero and clear services", "stale both zero rejected"]
         (output / "results.json").write_text(json.dumps(results, indent=2) + "\n")
         print(json.dumps({"artifacts": str(output), **results}, indent=2), flush=True)
         assert 28.5 <= results["image"]["hz"] <= 31.5, results

@@ -127,7 +127,8 @@ class ForceBaseline:
         while len(self.samples) > 1 and self.samples[0][0] < cutoff:
             self.samples.popleft()
 
-    def capture(self, view, stamp_ns):
+    def candidate(self, view, stamp_ns):
+        """Validate and compute without changing the current display baseline."""
         if (not view.valid or (view.frame, view.confirmed) != self.basis
                 or len(self.samples) < 20 or self.samples[-1][0] != stamp_ns
                 or (self.samples[-1][0] - self.samples[0][0]) / 1e9 < 0.8 * self.window_sec):
@@ -135,7 +136,10 @@ class ForceBaseline:
         forces = np.array([sample[1] for sample in self.samples])
         if not np.isfinite(forces).all() or np.max(np.std(forces, axis=0)) > self.max_std:
             raise ValueError("force window is unstable; display zero unchanged")
-        self.bias = np.mean(forces, axis=0)
+        return np.mean(forces, axis=0)
+
+    def capture(self, view, stamp_ns):
+        self.bias = self.candidate(view, stamp_ns)
         self.stamp_ns = stamp_ns
 
     def attach(self, view):
@@ -144,6 +148,19 @@ class ForceBaseline:
             view.zero_stamp_ns = self.stamp_ns
         else:
             view.force_bias, view.zero_stamp_ns = None, 0
+
+
+def capture_force_baselines(baselines, views, stamp_ns, sides):
+    """All-or-nothing update within the HUD's single-threaded executor callback."""
+    candidates = {}
+    for side in sides:
+        try:
+            candidates[side] = baselines[side].candidate(views[side], stamp_ns)
+        except ValueError as error:
+            raise ValueError(f"{side}: {error}; requested display zeros unchanged") from error
+    for side, bias in candidates.items():
+        baselines[side].bias = bias
+        baselines[side].stamp_ns = stamp_ns
 
 
 class HudModel:

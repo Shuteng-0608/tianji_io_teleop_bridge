@@ -337,6 +337,30 @@ ros2 launch tianji_io_teleop_bridge force_hud.launch.py \
 去零只修改 HUD 的显示基线，不改关节状态、SDK 估计、机器人控制或已记录的 raw/filtered 值。
 每臂独立，启动时无零点，重启后不保存。先确保末端无外部接触、保持参考姿态至少 1 秒：
 
+双臂一次去零（两侧都需无接触）：
+
+```bash
+ros2 service call /tianji_force_hud/both/zero_force std_srvs/srv/Trigger '{}'
+```
+
+双臂接口先分别校验两侧近期窗口，全部通过才一起更新。任何一侧无效、过期、样本不足或
+不稳定，整个调用返回 false，并在消息中指出原因；两侧旧零点均保持不变，不出现部分成功。
+左右臂仍使用各自的均值，不混合数据；本次记录相同采集时间戳，不要求两条独立调用严格同步。
+
+去零失败的判断依据：
+
+- `need a fresh valid stable window`：需至少20条不同时间戳的有效样本，跨度至少为
+  `zero_window_sec` 的80%，且当前数据新鲜。任一无效估计会清空该臂采样窗口，因此
+  等待超过1秒也不一定满足要求；先检查 `/tianji_force_hud/estimates` 中该臂的质量原因。
+- `force window is unstable`：窗口中原始基座系 `Fx/Fy/Fz` 至少一个分量的标准差超过
+  `zero_max_std`（当前0.3，按力单位约定为N）。检查的不是圆环已平滑后的值，也不是力矩。
+- `both` 先检查左臂，左臂失败后立即返回；该错误不能用来判断右臂是否也失败。
+
+保持静止、末端无接触且无人施力后再尝试；稳定性检查不能证明没有接触。
+不要为了让去零通过而直接关闭估计质量检查或盲目放宽阈值。显示去零不去除原始关节扰动的偏置。
+
+也可以继续分别调用：
+
 ```bash
 ros2 service call /tianji_force_hud/left/zero_force std_srvs/srv/Trigger '{}'
 ros2 service call /tianji_force_hud/right/zero_force std_srvs/srv/Trigger '{}'
@@ -353,6 +377,12 @@ ros2 service call /tianji_force_hud/right/zero_force std_srvs/srv/Trigger '{}'
 ```bash
 ros2 service call /tianji_force_hud/left/clear_force_zero std_srvs/srv/Trigger '{}'
 ros2 service call /tianji_force_hud/right/clear_force_zero std_srvs/srv/Trigger '{}'
+```
+
+一次清除双臂显示零点：
+
+```bash
+ros2 service call /tianji_force_hud/both/clear_force_zero std_srvs/srv/Trigger '{}'
 ```
 
 帧/单位约定确认状态变化、检测到源时间回退或连续有效样本发生过大时间间隔时清除零点；

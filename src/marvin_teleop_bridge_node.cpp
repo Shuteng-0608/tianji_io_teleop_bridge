@@ -20,6 +20,7 @@
 #include "diagnostic_msgs/msg/key_value.hpp"
 #include "geometry_msgs/msg/wrench_stamped.hpp"
 #include "rclcpp/rclcpp.hpp"
+#include "rcl_interfaces/msg/parameter_descriptor.hpp"
 #include "sensor_msgs/msg/joint_state.hpp"
 #include "std_msgs/msg/string.hpp"
 #include "std_srvs/srv/set_bool.hpp"
@@ -29,6 +30,8 @@
 #include "tianji_io_teleop_bridge/joint_model.hpp"
 #include "tianji_io_teleop_bridge/marvin_kinematics_adapter.hpp"
 #include "tianji_io_teleop_bridge/marvin_sdk_adapter.hpp"
+#include "tianji_io_teleop_bridge/send_timing.hpp"
+#include "tianji_io_teleop_bridge/retreat_check.hpp"
 
 namespace tianji_io_teleop_bridge
 {
@@ -44,7 +47,9 @@ enum class ControlPurpose
 {
   kNone,
   kTeleoperation,
-  kInitialPose
+  kInitialPose,
+  kRetreatRight,
+  kRetreatLeft
 };
 
 inline const char * control_purpose_name(ControlPurpose purpose)
@@ -56,6 +61,10 @@ inline const char * control_purpose_name(ControlPurpose purpose)
       return "TELEOPERATION";
     case ControlPurpose::kInitialPose:
       return "INITIAL_POSE";
+    case ControlPurpose::kRetreatRight:
+      return "RETREAT_RIGHT_10CM";
+    case ControlPurpose::kRetreatLeft:
+      return "RETREAT_LEFT_10CM";
   }
   return "UNKNOWN";
 }
@@ -75,6 +84,7 @@ inline const char * impedance_phase_name(ImpedanceConfigurationPhase phase)
 
 class MarvinTeleopBridgeNode : public rclcpp::Node
 {
+  friend class TargetSendTest;  // Offline fault-injection tests; SDK is replaced with stubs.
 public:
   MarvinTeleopBridgeNode()
   : Node("tianji_marvin_teleop_bridge"), control_gate_(20)
@@ -104,6 +114,7 @@ public:
     control_rate_hz_ = declare_parameter<double>("control_rate_hz", 100.0);
     feedback_timeout_sec_ = declare_parameter<double>("feedback_timeout_sec", 0.2);
     command_timeout_sec_ = declare_parameter<double>("command_timeout_sec", 0.15);
+    command_recovery_alignment_rad_ = declare_parameter<double>("command_recovery_alignment_rad", 0.1);
     command_reference_timeout_sec_ = declare_parameter<double>(
       "command_reference_timeout_sec", 0.2);
     max_command_step_rad_ = declare_parameter<double>("max_command_step_rad", 0.05);
@@ -118,9 +129,16 @@ public:
     soft_limit_recovery_alignment_rad_ = declare_parameter<double>(
       "soft_limit_recovery_alignment_rad", 0.10);
     max_following_error_rad_ = declare_parameter<double>("max_following_error_rad", 0.25);
+    retreat_duration_sec_ = declare_parameter<double>("retreat_duration_sec", 10.0);
+    rcl_interfaces::msg::ParameterDescriptor tool_parameter_descriptor;
+    tool_parameter_descriptor.read_only = true;
+    tools_config_file_ = declare_parameter<std::string>("tools_config_file", "", tool_parameter_descriptor);
+    tool_config_dry_run_ = declare_parameter<bool>("tool_config_dry_run", true, tool_parameter_descriptor);
+    tool_config_timeout_sec_ = declare_parameter<double>("tool_config_timeout_sec", 2.0, tool_parameter_descriptor);
     mode_transition_timeout_sec_ = declare_parameter<double>(
       "mode_transition_timeout_sec", 2.0);
     sdk_packet_settle_sec_ = declare_parameter<double>("sdk_packet_settle_sec", 0.25);
+    sdk_target_busy_timeout_sec_ = declare_parameter<double>("sdk_target_busy_timeout_sec", 0.1);
     hold_duration_sec_ = declare_parameter<double>("hold_duration_sec", 0.5);
     initial_pose_tolerance_rad_ = declare_parameter<double>(
       "initial_pose_tolerance_rad", 0.02);
@@ -191,6 +209,16 @@ public:
     }
     status_publisher_ = create_publisher<std_msgs::msg::String>(
       "~/control_status", rclcpp::QoS(1).reliable().durability_volatile());
+    tool_status_publisher_ = create_publisher<std_msgs::msg::String>(
+      "~/tool_configuration_status", rclcpp::QoS(1).reliable().transient_local());
+    for (std::size_t arm = 0; arm < 2; ++arm) {
+      tool_services_[arm] = create_service<std_srvs::srv::Trigger>(
+        arm == 0 ? "~/configure_left_tool" : "~/configure_right_tool",
+        [this, arm](const std_srvs::srv::Trigger::Request::SharedPtr,
+        std_srvs::srv::Trigger::Response::SharedPtr response) {on_configure_tool(arm, response);});
+    }
+    publish_tool_status("NOT_UPLOADED: no automatic tool configuration; dry_run=" +
+      std::string(tool_config_dry_run_ ? "true" : "false"));
     alignment_diagnostics_publisher_ =
       create_publisher<diagnostic_msgs::msg::DiagnosticArray>(
       alignment_diagnostics_topic_, rclcpp::QoS(1).reliable().durability_volatile());
@@ -210,6 +238,12 @@ public:
       std::bind(
         &MarvinTeleopBridgeNode::on_move_to_initial_pose, this,
         std::placeholders::_1, std::placeholders::_2));
+    retreat_service_ = create_service<std_srvs::srv::Trigger>("~/retreat_right_10cm",
+      [this](std_srvs::srv::Trigger::Request::SharedPtr,
+      std_srvs::srv::Trigger::Response::SharedPtr response) {on_retreat(1, response);});
+    retreat_left_service_ = create_service<std_srvs::srv::Trigger>("~/retreat_left_10cm",
+      [this](const std_srvs::srv::Trigger::Request::SharedPtr,
+      std_srvs::srv::Trigger::Response::SharedPtr response) {on_retreat(0, response);});
 
     const auto timer_period = std::chrono::duration_cast<std::chrono::nanoseconds>(
       std::chrono::duration<double>(1.0 / publish_rate_hz_));
@@ -232,7 +266,7 @@ public:
     }
     RCLCPP_INFO(
       get_logger(),
-      "Publishing %s at %.1f Hz; control updates at %.1f Hz; monitoring %s with "
+      "Publishing %s at %.1f Hz; control update ceiling %.1f Hz (completion-paced); monitoring %s with "
       "latest-sample QoS",
       state_topic_.c_str(), publish_rate_hz_, control_rate_hz_, command_topic_.c_str());
     RCLCPP_INFO(
@@ -300,6 +334,10 @@ private:
     }
     validate_positive_finite(feedback_timeout_sec_, "feedback_timeout_sec");
     validate_positive_finite(command_timeout_sec_, "command_timeout_sec");
+    validate_positive_finite(command_recovery_alignment_rad_, "command_recovery_alignment_rad");
+    if (command_recovery_alignment_rad_ > max_following_error_rad_) {
+      throw std::invalid_argument("command_recovery_alignment_rad must not exceed following-error threshold");
+    }
     validate_positive_finite(command_reference_timeout_sec_, "command_reference_timeout_sec");
     validate_positive_finite(max_command_step_rad_, "max_command_step_rad");
     validate_positive_finite(
@@ -309,8 +347,20 @@ private:
     validate_positive_finite(
       soft_limit_recovery_alignment_rad_, "soft_limit_recovery_alignment_rad");
     validate_positive_finite(max_following_error_rad_, "max_following_error_rad");
+    validate_positive_finite(retreat_duration_sec_, "retreat_duration_sec");
+    validate_positive_finite(tool_config_timeout_sec_, "tool_config_timeout_sec");
+    if (tool_config_timeout_sec_ <= sdk_packet_settle_sec_) {
+      throw std::invalid_argument("tool_config_timeout_sec must exceed sdk_packet_settle_sec");
+    }
     validate_positive_finite(mode_transition_timeout_sec_, "mode_transition_timeout_sec");
     validate_positive_finite(sdk_packet_settle_sec_, "sdk_packet_settle_sec");
+    validate_positive_finite(sdk_target_busy_timeout_sec_, "sdk_target_busy_timeout_sec");
+    if (sdk_target_busy_timeout_sec_ > command_timeout_sec_ ||
+      sdk_target_busy_timeout_sec_ > feedback_timeout_sec_)
+    {
+      throw std::invalid_argument(
+              "sdk_target_busy_timeout_sec must not exceed command/feedback timeout");
+    }
     validate_positive_finite(hold_duration_sec_, "hold_duration_sec");
     validate_positive_finite(initial_pose_tolerance_rad_, "initial_pose_tolerance_rad");
     validate_positive_finite(initial_pose_timeout_sec_, "initial_pose_timeout_sec");
@@ -518,14 +568,20 @@ private:
     frames_initialized_ = false;
     frame_advanced_once_.fill(false);
     last_feedback_advance_.fill(std::chrono::steady_clock::now());
-    next_control_cycle_ = std::chrono::steady_clock::time_point{};
+    control_pacer_.reset();
+    send_timing_ = SendTiming{};
+    target_send_guard_.reset();
+    last_submitted_target_rad_.reset();
+    feedback_recovery_frames_.reset();
     control_engaged_ = false;
+    retreat_control_arms_.reset();
     control_purpose_ = ControlPurpose::kNone;
     initial_pose_stable_frames_ = 0;
     idle_retry_pending_ = false;
     impedance_configuration_phase_ = ImpedanceConfigurationPhase::kNone;
     clear_soft_limit_state();
     control_gate_.disarm("SDK connected; explicit enable required");
+    retreat_completion_pending_ = false;
     RCLCPP_INFO(get_logger(), "Marvin SDK connection established");
     return true;
   }
@@ -536,12 +592,13 @@ private:
       return;
     }
     if (allow_motion_ && control_engaged_) {
-      if (!sdk_.request_idle(enabled_arms_)) {
+      if (!sdk_.request_idle(control_arms())) {
         RCLCPP_ERROR(
           get_logger(), "Best-effort idle request failed during shutdown: %s",
           sdk_.last_error().c_str());
       }
       control_engaged_ = false;
+      retreat_control_arms_.reset();
     }
     if (!sdk_.disconnect()) {
       RCLCPP_ERROR(get_logger(), "Marvin SDK release failed: %s", sdk_.last_error().c_str());
@@ -552,7 +609,9 @@ private:
 
   void on_timer()
   {
+    process_tool_upload(nullptr); // Timeout also runs when no fresh feedback arrives.
     const auto now_steady = std::chrono::steady_clock::now();
+    send_timing_.timer_started(now_steady);
     publish_alignment_diagnostics_if_due(now_steady);
     if (!sdk_.connected()) {
       if (connect_on_start_ && now_steady >= next_connect_attempt_) {
@@ -569,12 +628,18 @@ private:
     process_idle_retry(now_steady);
 
     DCSS feedback{};
-    if (!sdk_.read_feedback(feedback)) {
+    const auto read_started = std::chrono::steady_clock::now();
+    const bool read_ok = sdk_.read_feedback(feedback);
+    const auto read_finished = std::chrono::steady_clock::now();
+    send_timing_.feedback_sdk_ms = SendTiming::ms(read_finished, read_started);
+    send_timing_.max_feedback_sdk_ms = std::max(
+      send_timing_.max_feedback_sdk_ms, send_timing_.feedback_sdk_ms);
+    if (!read_ok) {
       RCLCPP_ERROR_THROTTLE(
         get_logger(), *get_clock(), 1000, "Marvin feedback read failed: %s",
         sdk_.last_error().c_str());
       if (control_engaged_) {
-        fault_and_idle("feedback read failed");
+        pause_teleoperation_or_fault("feedback read failed", true);
       }
       publish_status_if_due(now_steady);
       return;
@@ -588,39 +653,59 @@ private:
       publish_status_if_due(now_steady);
       return;
     }
-    if (!feedback_frames_are_fresh(feedback, now_steady)) {
+    // A reported controller fault is not a recoverable telemetry interruption.
+    if (control_engaged_ && !robot_healthy_for_enabled_arms(feedback)) {
+      fault_and_idle("robot reported an error in feedback");
+      publish_status_if_due(std::chrono::steady_clock::now());
+      return;
+    }
+    if (!feedback_frames_are_fresh(feedback, read_finished)) {
       if (control_engaged_) {
-        fault_and_idle("feedback frame timeout");
+        pause_teleoperation_or_fault("feedback frame timeout", true);
       }
       publish_status_if_due(now_steady);
       return;
     }
 
     latest_dcss_ = feedback;
-    last_feedback_receive_ = now_steady;
+    last_feedback_receive_ = read_finished;
     report_robot_errors(feedback);
     const auto feedback_stamp = now();
-    const JointArray feedback_rad = publish_feedback(feedback, feedback_stamp);
-    const auto control_period =
-      std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-      std::chrono::duration<double>(1.0 / control_rate_hz_));
-    const bool control_update_due = next_control_cycle_.time_since_epoch().count() == 0 ||
-      now_steady >= next_control_cycle_;
-    if (control_update_due) {
-      if (next_control_cycle_.time_since_epoch().count() == 0) {
-        next_control_cycle_ = now_steady + control_period;
-      } else {
-        do {
-          next_control_cycle_ += control_period;
-        } while (next_control_cycle_ <= now_steady);
-      }
-      update_control(feedback, feedback_rad, now_steady);
+    const JointArray feedback_rad = feedback_positions(feedback);
+    {
+      std::lock_guard<std::mutex> lock(data_mutex_);
+      latest_feedback_rad_ = feedback_rad;
+      have_feedback_ = true;
     }
+    process_tool_upload(&feedback);
+    // Check on every feedback tick, even when the next control update is not due.
+    if (!control_engaged_) {
+      target_send_guard_.reset();
+    } else if (target_send_guard_.expired(
+        std::chrono::steady_clock::now(), sdk_target_busy_timeout_sec_))
+    {
+      pause_teleoperation_or_fault("joint target retry deadline exceeded");
+    }
+    const auto control_now = std::chrono::steady_clock::now();
+    if (control_pacer_.due(control_now)) {
+      // Do not use the callback-entry time for command freshness after a slow read.
+      if (control_engaged_ && SendTiming::ms(control_now, read_finished) >
+        feedback_timeout_sec_ * 1000.0)
+      {
+        pause_teleoperation_or_fault("feedback snapshot expired before control update", true);
+      } else {
+        update_control(feedback, feedback_rad, control_now);
+      }
+      control_pacer_.completed(std::chrono::steady_clock::now(), 1.0 / control_rate_hz_);
+    }
+    // Telemetry serialization/publishing must not age this tick's control snapshot.
+    // This remains a single-threaded executor: a blocked publisher can delay the NEXT tick.
+    publish_feedback(feedback, feedback_stamp);
     if (publish_cartesian_disturbance_) {
       // Keep the existing control path ahead of the optional telemetry serialization.
       publish_cartesian_disturbance_estimates(feedback, feedback_stamp);
     }
-    publish_status_if_due(now_steady);
+    publish_status_if_due(std::chrono::steady_clock::now());
   }
 
   bool feedback_frames_are_fresh(
@@ -693,16 +778,24 @@ private:
     }
   }
 
-  JointArray publish_feedback(const DCSS & feedback, const rclcpp::Time & stamp)
+  static JointArray feedback_positions(const DCSS & feedback)
   {
     JointArray positions_rad{};
-    JointArray velocities_rad_s{};
-    JointArray joint_disturbance{};
-    bool joint_disturbance_finite = true;
     for (std::size_t joint = 0; joint < kArmDof; ++joint) {
       positions_rad[joint] = degrees_to_radians(feedback.m_Out[0].m_FB_Joint_Pos[joint]);
       positions_rad[kArmDof + joint] = degrees_to_radians(
         feedback.m_Out[1].m_FB_Joint_Pos[joint]);
+    }
+    return positions_rad;
+  }
+
+  void publish_feedback(const DCSS & feedback, const rclcpp::Time & stamp)
+  {
+    const JointArray positions_rad = feedback_positions(feedback);
+    JointArray velocities_rad_s{};
+    JointArray joint_disturbance{};
+    bool joint_disturbance_finite = true;
+    for (std::size_t joint = 0; joint < kArmDof; ++joint) {
       velocities_rad_s[joint] = degrees_to_radians(
         feedback.m_Out[0].m_FB_Joint_Vel[joint]);
       velocities_rad_s[kArmDof + joint] = degrees_to_radians(
@@ -721,13 +814,7 @@ private:
         "Published Marvin joint state without effort because estimated disturbance was "
         "non-finite");
     }
-    {
-      std::lock_guard<std::mutex> lock(data_mutex_);
-      latest_feedback_rad_ = positions_rad;
-      have_feedback_ = true;
-    }
     state_publisher_->publish(message);
-    return positions_rad;
   }
 
   void publish_cartesian_disturbance_estimates(
@@ -761,14 +848,19 @@ private:
     }
   }
 
+  // Keep the selected scope through HOLD/FAULT/idle retries, even after purpose
+  // is cleared. The untouched arm must never receive shutdown/idle packets.
+  EnabledArms control_arms() const {return retreat_control_arms_.value_or(enabled_arms_);}
+  const char * retreat_arm_name() const {return retreat_arm_ == 0 ? "left" : "right";}
+
   bool robot_healthy_for_enabled_arms(const DCSS & feedback) const
   {
     const auto healthy = [&feedback](std::size_t arm) {
         return feedback.m_State[arm].m_CurState != ARM_STATE_ERROR &&
                feedback.m_State[arm].m_ERRCode == 0;
       };
-    return (!left_enabled(enabled_arms_) || healthy(0)) &&
-           (!right_enabled(enabled_arms_) || healthy(1));
+    return (!left_enabled(control_arms()) || healthy(0)) &&
+           (!right_enabled(control_arms()) || healthy(1));
   }
 
   bool impedance_parameters_verified(const DCSS & feedback) const
@@ -792,8 +884,8 @@ private:
         }
         return true;
       };
-    return (!left_enabled(enabled_arms_) || verified(0)) &&
-           (!right_enabled(enabled_arms_) || verified(1));
+    return (!left_enabled(control_arms()) || verified(0)) &&
+           (!right_enabled(control_arms()) || verified(1));
   }
 
   bool impedance_mode_verified(const DCSS & feedback) const
@@ -803,8 +895,8 @@ private:
                feedback.m_In[arm].m_ImpType == ARM_IMP_JOINT;
       };
     return impedance_parameters_verified(feedback) &&
-           (!left_enabled(enabled_arms_) || mode_verified(0)) &&
-           (!right_enabled(enabled_arms_) || mode_verified(1));
+           (!left_enabled(control_arms()) || mode_verified(0)) &&
+           (!right_enabled(control_arms()) || mode_verified(1));
   }
 
   static JointArray radians_to_degrees(const JointArray & radians)
@@ -825,10 +917,10 @@ private:
             maximum, std::abs(first[offset + joint] - second[offset + joint]));
         }
       };
-    if (left_enabled(enabled_arms_)) {
+    if (left_enabled(control_arms())) {
       inspect_arm(0);
     }
-    if (right_enabled(enabled_arms_)) {
+    if (right_enabled(control_arms())) {
       inspect_arm(kArmDof);
     }
     return maximum;
@@ -836,7 +928,7 @@ private:
 
   std::array<bool, 2> enabled_arm_mask() const
   {
-    return {left_enabled(enabled_arms_), right_enabled(enabled_arms_)};
+    return {left_enabled(control_arms()), right_enabled(control_arms())};
   }
 
   static bool any_arm_selected(const std::array<bool, 2> & arms)
@@ -861,8 +953,8 @@ private:
   bool enabled_arms_are_safe(const JointLimitMarginResult & result) const
   {
     return result.valid &&
-           (!left_enabled(enabled_arms_) || result.arm_safe[0]) &&
-           (!right_enabled(enabled_arms_) || result.arm_safe[1]);
+           (!left_enabled(control_arms()) || result.arm_safe[0]) &&
+           (!right_enabled(control_arms()) || result.arm_safe[1]);
   }
 
   bool enabled_targets_within_margin(const JointArray & positions, double margin_rad) const
@@ -910,8 +1002,8 @@ private:
     bool first = true;
     for (std::size_t index = 0; index < kJointCount; ++index) {
       const std::size_t arm = index / kArmDof;
-      if ((arm == 0 && !left_enabled(enabled_arms_)) ||
-        (arm == 1 && !right_enabled(enabled_arms_)) || result.joint_safe[index])
+      if ((arm == 0 && !left_enabled(control_arms())) ||
+        (arm == 1 && !right_enabled(control_arms())) || result.joint_safe[index])
       {
         continue;
       }
@@ -930,14 +1022,59 @@ private:
     const JointArray & command, const JointArray & feedback) const
   {
     JointArray enabled_command = command;
-    if (!left_enabled(enabled_arms_)) {
+    if (!left_enabled(control_arms())) {
       std::copy_n(feedback.begin(), kArmDof, enabled_command.begin());
     }
-    if (!right_enabled(enabled_arms_)) {
+    if (!right_enabled(control_arms())) {
       std::copy_n(
         feedback.begin() + kArmDof, kArmDof, enabled_command.begin() + kArmDof);
     }
     return enabled_command;
+  }
+
+  bool submit_joint_target(const JointArray & target_rad)
+  {
+    const auto now_steady = std::chrono::steady_clock::now();
+    // Do not send a late recovery target after the deadline has already elapsed.
+    if (target_send_guard_.expired(now_steady, sdk_target_busy_timeout_sec_)) {
+      pause_teleoperation_or_fault("joint target retry deadline exceeded");
+      return false;
+    }
+    const auto target_deg = radians_to_degrees(target_rad);
+    const auto sdk_started = std::chrono::steady_clock::now();
+    send_timing_.target_started(sdk_started);
+    const auto result = sdk_.send_joint_targets(control_arms(), target_deg);
+    const auto sdk_finished = std::chrono::steady_clock::now();
+    send_timing_.target_sdk_ms = SendTiming::ms(sdk_finished, sdk_started);
+    send_timing_.max_target_sdk_ms = std::max(
+      send_timing_.max_target_sdk_ms, send_timing_.target_sdk_ms);
+    if (result == TargetSendResult::kBusy) {
+      const bool first_busy = !target_send_guard_.busy();
+      target_send_guard_.observe_busy(sdk_finished);
+      ++send_timing_.busy_total;
+      if (first_busy) {
+        RCLCPP_WARN_THROTTLE(
+          get_logger(), *get_clock(), 1000,
+          "Joint target SDK busy; skipping this update (retry deadline %.0f ms); %s",
+          sdk_target_busy_timeout_sec_ * 1000.0, send_timing_.describe(sdk_finished).c_str());
+      }
+      return false;
+    }
+    if (result == TargetSendResult::kError) {
+      fault_and_idle("joint target send failed: " + sdk_.last_error());
+      return false;
+    }
+    if (target_send_guard_.busy()) {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 1000,
+        "Joint target submitted again %.1f ms after first busy response / %zu busy responses; %s",
+        target_send_guard_.age_sec(sdk_finished) * 1000.0,
+        target_send_guard_.attempts(), send_timing_.describe(sdk_finished).c_str());
+    }
+    send_timing_.target_submitted = sdk_finished;
+    last_submitted_target_rad_ = target_rad;
+    target_send_guard_.reset();
+    return true;
   }
 
   bool send_slew_limited_target(
@@ -949,13 +1086,16 @@ private:
         std::chrono::duration<double>(now_steady - last_control_update_).count(),
         1.0 / (control_rate_hz_ * 2.0), 2.0 / control_rate_hz_);
     }
-    last_control_update_ = now_steady;
-    const JointArray limited = slew_limiter_.update(
+    // Stage limiter state on a copy. A busy/error result must not advance position
+    // or velocity as though an unsent target had reached the controller.
+    auto candidate_limiter = slew_limiter_;
+    const JointArray limited = candidate_limiter.update(
       desired, max_velocity_rad_s_, max_acceleration_rad_s2_, dt_sec);
-    if (!sdk_.send_joint_targets(enabled_arms_, radians_to_degrees(limited))) {
-      fault_and_idle("joint target send failed: " + sdk_.last_error());
+    if (!submit_joint_target(limited)) {
       return false;
     }
+    slew_limiter_ = candidate_limiter;
+    last_control_update_ = now_steady;
     last_sent_target_rad_ = limited;
     return true;
   }
@@ -1056,7 +1196,7 @@ private:
         return;
       }
       if (impedance_configuration_phase_ == ImpedanceConfigurationPhase::kNone) {
-        if (!sdk_.configure_joint_impedance_parameters(enabled_arms_, impedance_settings_)) {
+        if (!sdk_.configure_joint_impedance_parameters(control_arms(), impedance_settings_)) {
           fault_and_idle("impedance parameter configuration failed: " + sdk_.last_error());
           return;
         }
@@ -1077,7 +1217,7 @@ private:
         // Switching control mode can change robot behavior even though this packet contains
         // no position target. Mark it engaged first so every partial failure requests idle.
         control_engaged_ = true;
-        if (!sdk_.enter_joint_impedance_mode(enabled_arms_)) {
+        if (!sdk_.enter_joint_impedance_mode(control_arms())) {
           fault_and_idle("impedance mode request failed: " + sdk_.last_error());
           return;
         }
@@ -1130,7 +1270,35 @@ private:
         ImpedanceConfigurationPhase::kWaitingForModeEcho && impedance_mode_verified(feedback))
       {
         impedance_configuration_phase_ = ImpedanceConfigurationPhase::kNone;
-        if (control_purpose_ == ControlPurpose::kInitialPose) {
+        if (control_purpose_ == ControlPurpose::kRetreatRight ||
+          control_purpose_ == ControlPurpose::kRetreatLeft)
+        {
+          // Plan once from the actual pose after mode confirmation. Never reuse a
+          // pre-switch path whose start may have shifted under soft impedance.
+          ArmAngles q{};
+          for (int j = 0; j < 7; ++j) {q[j] = tianji_io_teleop_bridge::radians_to_degrees(feedback_rad[j + 7 * retreat_arm_]);}
+          retreat_plan_ = check_retreat(retreat_arm_, q, joint_limit_safety_margin_rad_, 100.0, 1000, true);
+          if (!retreat_plan_.success) {
+            begin_retreat_hold("post-mode planning failed: " + retreat_plan_.reason); return;
+          }
+          ArmAngles velocity{}, acceleration{};
+          for (int j = 0; j < 7; ++j) {
+            velocity[j] = std::min(max_velocity_rad_s_[j + 7 * retreat_arm_], 0.20);
+            acceleration[j] = std::min(max_acceleration_rad_s2_[j + 7 * retreat_arm_], 0.40);
+          }
+          retreat_period_sec_ = retreat_sample_period(
+            retreat_plan_.path_deg, retreat_duration_sec_, velocity, acceleration);
+          retreat_period_sec_ = std::max(retreat_period_sec_, 1.0 / control_rate_hz_);
+          last_sent_target_rad_ = feedback_rad;
+          last_control_update_ = now_steady;
+          retreat_started_ = now_steady;
+          retreat_next_ = now_steady + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+            std::chrono::duration<double>(retreat_period_sec_));
+          retreat_index_ = 1;
+          control_gate_.mark_retreating();
+          RCLCPP_WARN(get_logger(), "%s retreat ACTIVE: -X 100 mm, smooth start/stop; planned %.2f s, control ceiling %.1f Hz",
+            retreat_arm_name(), retreat_period_sec_ * 1000, control_rate_hz_);
+        } else if (control_purpose_ == ControlPurpose::kInitialPose) {
           initial_pose_started_ = now_steady;
           initial_pose_stable_frames_ = 0;
           slew_limiter_.reset(feedback_rad);
@@ -1156,6 +1324,62 @@ private:
       return;
     }
 
+    if (state == ControlState::kRetreatHold) {
+      if (!robot_healthy || !impedance_mode_verified(feedback)) {
+        fault_and_idle("robot error/mode loss during retreat hold");
+      }
+      return;  // No new targets and no automatic teleoperation resumption.
+    }
+    if (state == ControlState::kRetreating) {
+      if (!robot_healthy || !impedance_mode_verified(feedback)) {
+        fault_and_idle("robot error/mode loss during retreat"); return;
+      }
+      if (!enabled_targets_within_margin(feedback_rad, joint_limit_safety_margin_rad_)) {
+        begin_retreat_hold("measured joint position entered safety margin"); return;
+      }
+      if (std::chrono::duration<double>(now_steady - retreat_started_).count() >
+        std::max(30.0, retreat_period_sec_ * 1000 * 3.0))
+      {
+        begin_retreat_hold("retreat send timeout; retaining last submitted target"); return;
+      }
+      // Reuse the bridge's joint-following bound rather than imposing a separate
+      // precision Cartesian servo criterion on a compliant joint controller.
+      if (max_enabled_delta(last_sent_target_rad_, feedback_rad) > max_following_error_rad_) {
+        begin_retreat_hold("retreat exceeded max_following_error_rad; retaining last submitted target"); return;
+      }
+      if (now_steady < retreat_next_) {return;}
+      JointArray desired = feedback_rad;
+      for (int j = 0; j < 7; ++j) {
+        desired[j + 7 * retreat_arm_] = degrees_to_radians(retreat_plan_.path_deg[retreat_index_][j]);
+      }
+      if (!enabled_targets_within_margin(desired, joint_limit_safety_margin_rad_)) {
+        begin_retreat_hold("retreat target violates joint margin"); return;
+      }
+      // The entire sampled trajectory was rate-checked before execution. Do not
+      // reset velocity at every waypoint through the point-target slew limiter.
+      if (submit_joint_target(desired)) {
+        last_sent_target_rad_ = desired;
+        last_control_update_ = now_steady;
+        ++retreat_index_;
+        if (retreat_index_ >= retreat_plan_.path_deg.size()) {
+          control_purpose_ = ControlPurpose::kNone;
+          hold_target_rad_ = last_sent_target_rad_;
+          hold_started_ = std::chrono::steady_clock::now();
+          // Preserve the selected arm scope until IDLE succeeds, including retries.
+          retreat_completion_pending_ = true;
+          const std::string reason = std::string(retreat_arm_name()) +
+            " retreat target sequence sent: -X 100 mm; actual arrival not verified; holding briefly before idle";
+          control_gate_.enter_hold(reason);
+          RCLCPP_INFO(get_logger(), "%s", reason.c_str());
+          return;
+        }
+        // Completion paced: a delayed/busy send never causes a catch-up burst.
+        retreat_next_ = std::max(now_steady, std::chrono::steady_clock::now()) +
+          std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+          std::chrono::duration<double>(retreat_period_sec_));
+      }
+      return;
+    }
     if (state == ControlState::kReturningToInitialPose) {
       if (!robot_healthy) {
         begin_hold("robot reported an error while returning to initial pose", feedback_rad,
@@ -1204,7 +1428,7 @@ private:
         return;
       }
       if (!command_fresh) {
-        begin_hold("valid arm command timed out", feedback_rad, now_steady);
+        begin_command_wait("valid arm command timed out");
         return;
       }
       if (max_enabled_delta(last_sent_target_rad_, feedback_rad) > max_following_error_rad_) {
@@ -1229,7 +1453,7 @@ private:
         return;
       }
       if (!command_fresh) {
-        begin_hold("valid arm command timed out during soft-limit hold", feedback_rad, now_steady);
+        begin_command_wait("valid arm command timed out during soft-limit hold");
         return;
       }
       if (max_enabled_delta(last_sent_target_rad_, feedback_rad) > max_following_error_rad_) {
@@ -1270,6 +1494,63 @@ private:
       return;
     }
 
+    if (state == ControlState::kCommandWait) {
+      if (!robot_healthy || !impedance_mode_verified(feedback)) {
+        fault_and_idle("robot error or impedance mode changed while waiting for commands");
+        return;
+      }
+      if (feedback_recovery_frames_) {
+        if (feedback.m_Out[0].m_OutFrameSerial == (*feedback_recovery_frames_)[0] ||
+          feedback.m_Out[1].m_OutFrameSerial == (*feedback_recovery_frames_)[1])
+        {
+          (void)control_gate_.observe_alignment(false);
+          return;
+        }
+        feedback_recovery_frames_.reset();
+        // Commands received during the feedback outage must not count towards recovery.
+        last_recovery_command_count_ = accepted_command_count_;
+        {
+          std::lock_guard<std::mutex> lock(data_mutex_);
+          last_valid_command_time_.reset();
+        }
+        (void)control_gate_.observe_alignment(false);
+        RCLCPP_WARN(get_logger(),
+          "Both feedback frames advanced again; waiting for fresh commands to realign");
+        return;
+      }
+      if (command_wait_target_rad_ &&
+        max_enabled_delta(*command_wait_target_rad_, feedback_rad) > max_following_error_rad_)
+      {
+        begin_hold("following error exceeded safety threshold while waiting for commands",
+          feedback_rad, now_steady);
+        return;
+      }
+      const bool aligned = command_fresh &&
+        enabled_targets_within_margin(command, soft_limit_release_margin_rad_) &&
+        max_enabled_delta(command, feedback_rad) <= command_recovery_alignment_rad_;
+      if (!aligned) {
+        (void)control_gate_.observe_alignment(false);
+        last_recovery_command_count_ = accepted_command_count_;
+        return;
+      }
+      // A single cached message must not accumulate enough checks to resume.
+      if (accepted_command_count_ == last_recovery_command_count_) {
+        return;
+      }
+      last_recovery_command_count_ = accepted_command_count_;
+      if (control_gate_.observe_alignment(true)) {
+        const auto start = command_wait_target_rad_.value_or(feedback_rad);
+        slew_limiter_.reset(start);
+        last_sent_target_rad_ = start;
+        last_control_update_ = now_steady;
+        clear_soft_limit_state();
+        control_gate_.mark_active();
+        RCLCPP_WARN(get_logger(), "Fresh commands realigned; resuming ACTIVE from held target");
+      }
+      // No target or mode packets during COMMAND_WAIT. Controller retains its last target.
+      return;
+    }
+
     if (state == ControlState::kHold) {
       if (!control_engaged_) {
         control_gate_.disarm("hold completed; explicit re-enable required");
@@ -1277,27 +1558,84 @@ private:
       }
       const double hold_age = std::chrono::duration<double>(now_steady - hold_started_).count();
       if (robot_healthy && hold_age < hold_duration_sec_) {
-        if (!sdk_.send_joint_targets(enabled_arms_, radians_to_degrees(hold_target_rad_))) {
-          fault_and_idle("failed to send hold target: " + sdk_.last_error());
-        }
+        (void)submit_joint_target(hold_target_rad_);
         return;
       }
-      if (!sdk_.request_idle(enabled_arms_)) {
+      if (!sdk_.request_idle(control_arms())) {
         control_gate_.enter_fault("idle request failed after hold: " + sdk_.last_error());
         RCLCPP_ERROR(get_logger(), "%s", control_gate_.reason().c_str());
         schedule_idle_retry();
         return;
       } else {
         control_gate_.disarm("hold completed; explicit re-enable required");
+        if (retreat_completion_pending_) {
+          RCLCPP_INFO(get_logger(), "%s retreat finished: IDLE request sent; returned to MONITOR", retreat_arm_name());
+          retreat_completion_pending_ = false;
+        }
       }
       control_engaged_ = false;
+      retreat_control_arms_.reset();
     }
+  }
+
+  void begin_command_wait(const std::string & reason)
+  {
+    const bool already_waiting = control_gate_.state() == ControlState::kCommandWait;
+    command_wait_target_rad_ = last_submitted_target_rad_;
+    // The retry window limits active retries, not how long the controller may hold.
+    target_send_guard_.reset();
+    clear_soft_limit_state();
+    last_recovery_command_count_ = accepted_command_count_;
+    {
+      std::lock_guard<std::mutex> lock(data_mutex_);
+      last_valid_command_time_.reset();
+    }
+    control_gate_.enter_command_wait(reason);
+    if (already_waiting) {
+      return;
+    }
+    RCLCPP_WARN(get_logger(),
+      "Entering COMMAND_WAIT: %s; keeping impedance and last submitted target; no automatic idle",
+      reason.c_str());
+  }
+
+  void pause_teleoperation_or_fault(const std::string & reason, bool feedback_unavailable = false)
+  {
+    const auto state = control_gate_.state();
+    if (state == ControlState::kRetreating || state == ControlState::kRetreatHold) {
+      if (state != ControlState::kRetreatHold) {begin_retreat_hold(reason);}
+      return;
+    }
+    // Do not turn a manual stop, a configuration failure or a return-to-pose task
+    // into automatically resumable teleoperation.
+    const bool can_wait = control_engaged_ && !idle_retry_pending_ &&
+      (state == ControlState::kActive || state == ControlState::kSoftLimitHold ||
+      state == ControlState::kCommandWait || state == ControlState::kWaitingForAlignment);
+    if (!can_wait) {
+      fault_and_idle(reason);
+      return;
+    }
+    std::string detail = reason;
+    if (target_send_guard_.busy()) {
+      detail += "; elapsed_since_first_busy_ms=" + std::to_string(
+        target_send_guard_.age_sec(std::chrono::steady_clock::now()) * 1000.0) +
+        " busy_responses=" + std::to_string(target_send_guard_.attempts());
+    }
+    detail += "; " + send_timing_.describe(std::chrono::steady_clock::now());
+    if (feedback_unavailable && !feedback_recovery_frames_) {
+      feedback_recovery_frames_ = last_frames_;
+    }
+    begin_command_wait(detail);
+    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
+      "Teleoperation paused without idle: %s", detail.c_str());
   }
 
   void begin_hold(
     const std::string & reason, const JointArray & feedback_rad,
     std::chrono::steady_clock::time_point now_steady)
   {
+    retreat_completion_pending_ = false;
+    feedback_recovery_frames_.reset();
     clear_soft_limit_state();
     control_purpose_ = ControlPurpose::kNone;
     initial_pose_stable_frames_ = 0;
@@ -1323,19 +1661,30 @@ private:
 
   void fault_and_idle(const std::string & reason)
   {
+    retreat_completion_pending_ = false;
+    feedback_recovery_frames_.reset();
+    std::string detail = reason;
+    if (target_send_guard_.busy()) {
+      detail += "; elapsed_since_first_busy_ms=" + std::to_string(
+        target_send_guard_.age_sec(std::chrono::steady_clock::now()) * 1000.0) +
+        " busy_responses=" + std::to_string(target_send_guard_.attempts());
+    }
+    detail += "; " + send_timing_.describe(std::chrono::steady_clock::now());
+    target_send_guard_.reset();
     clear_soft_limit_state();
     control_purpose_ = ControlPurpose::kNone;
     initial_pose_stable_frames_ = 0;
-    control_gate_.enter_fault(reason);
+    control_gate_.enter_fault(detail);
     impedance_configuration_phase_ = ImpedanceConfigurationPhase::kNone;
-    RCLCPP_ERROR(get_logger(), "Control fault: %s", reason.c_str());
+    RCLCPP_ERROR(get_logger(), "Control fault: %s", detail.c_str());
     if (allow_motion_ && control_engaged_ && sdk_.connected() && !idle_retry_pending_) {
-      if (!sdk_.request_idle(enabled_arms_)) {
+      if (!sdk_.request_idle(control_arms())) {
         RCLCPP_ERROR(
           get_logger(), "Best-effort idle request also failed: %s", sdk_.last_error().c_str());
         schedule_idle_retry();
       } else {
         control_engaged_ = false;
+        retreat_control_arms_.reset();
       }
     }
   }
@@ -1355,9 +1704,15 @@ private:
       return;
     }
     ++idle_retry_attempts_;
-    if (sdk_.request_idle(enabled_arms_)) {
+    if (sdk_.request_idle(control_arms())) {
+      if (retreat_completion_pending_) {
+        control_gate_.disarm("retreat completed; delayed idle sent; explicit re-enable required");
+        retreat_completion_pending_ = false;
+        RCLCPP_INFO(get_logger(), "%s retreat finished: delayed IDLE request sent; returned to MONITOR", retreat_arm_name());
+      }
       idle_retry_pending_ = false;
       control_engaged_ = false;
+      retreat_control_arms_.reset();
       RCLCPP_WARN(get_logger(), "Delayed idle retry succeeded");
       return;
     }
@@ -1409,6 +1764,13 @@ private:
         get_logger(), *get_clock(), 1000,
         "Rejected Tianji arm joint_cmd (%lu rejected): %s",
         static_cast<unsigned long>(rejected_command_count_), evaluation.reason.c_str());
+      if (motion_is_following) {
+        begin_command_wait("rejected arm command: " + evaluation.reason);
+      } else if (state == ControlState::kCommandWait) {
+        (void)control_gate_.observe_alignment(false);
+        std::lock_guard<std::mutex> lock(data_mutex_);
+        last_valid_command_time_.reset();
+      }
       return;
     }
 
@@ -1418,6 +1780,13 @@ private:
       last_valid_command_time_ = now_steady;
     }
     ++accepted_command_count_;
+    if (state == ControlState::kCommandWait &&
+      (!have_feedback_ ||
+      max_enabled_delta(evaluation.positions_rad, latest_feedback_rad_) > command_recovery_alignment_rad_ ||
+      !enabled_targets_within_margin(evaluation.positions_rad, soft_limit_release_margin_rad_)))
+    {
+      (void)control_gate_.observe_alignment(false);
+    }
   }
 
   void on_enable_control(
@@ -1442,13 +1811,17 @@ private:
         control_purpose_ = ControlPurpose::kNone;
         initial_pose_stable_frames_ = 0;
         control_gate_.disarm("operator requested disable");
+        retreat_completion_pending_ = false;
+        retreat_control_arms_.reset();
         response->message = "control disabled";
       }
       response->success = true;
       return;
     }
 
-    if (!allow_motion_) {
+    if (tool_upload_ || tool_configuration_uncertain()) {
+      response->message = "refused: tool upload pending/unconfirmed; verify tool configuration first";
+    } else if (!allow_motion_) {
       response->message = "refused: allow_motion is false";
     } else if (control_gate_.state() != ControlState::kMonitor || control_engaged_) {
       response->message = "refused: control is not in MONITOR; disable or resolve the fault first";
@@ -1470,6 +1843,8 @@ private:
       impedance_configuration_phase_ = ImpedanceConfigurationPhase::kNone;
       clear_soft_limit_state();
       control_purpose_ = ControlPurpose::kTeleoperation;
+      last_submitted_target_rad_.reset();
+      feedback_recovery_frames_.reset();
       initial_pose_stable_frames_ = 0;
       control_gate_.request_enable();
       response->success = true;
@@ -1480,11 +1855,182 @@ private:
     response->success = false;
   }
 
+  void begin_retreat_hold(const std::string & reason)
+  {
+    retreat_completion_pending_ = false;
+    target_send_guard_.reset();
+    clear_soft_limit_state();
+    control_gate_.enter_retreat_hold(reason);
+    RCLCPP_WARN(get_logger(), "RETREAT_HOLD: %s; no automatic idle or teleoperation", reason.c_str());
+  }
+
+  void publish_tool_status(const std::string & message)
+  {
+    std_msgs::msg::String status;
+    status.data = message;
+    tool_status_publisher_->publish(status);
+    RCLCPP_INFO(get_logger(), "%s", message.c_str());
+  }
+
+  bool tool_configuration_uncertain() const
+  {
+    return tool_configuration_uncertain_arms_[0] || tool_configuration_uncertain_arms_[1];
+  }
+
+  void finish_tool_upload(bool verified, const std::string & reason)
+  {
+    const auto details = describe_tool_configuration(tool_upload_->arm, tool_upload_->config);
+    tool_configuration_uncertain_arms_[tool_upload_->arm] = !verified;
+    tool_upload_.reset();
+    publish_tool_status((verified ? "VERIFIED: " : "UNCONFIRMED: ") + reason + " " + details);
+  }
+
+  void process_tool_upload(const DCSS * feedback)
+  {
+    if (!tool_upload_) {return;}
+    const double age = std::chrono::duration<double>(
+      std::chrono::steady_clock::now() - tool_upload_->started).count();
+    if (age > tool_config_timeout_sec_) {
+      finish_tool_upload(false, "tool feedback timeout; no rollback or automatic retry; motion blocked");
+      return;
+    }
+    if (!feedback) {return;}
+    const auto arm = tool_upload_->arm;
+    if (feedback->m_State[arm].m_CurState != ARM_STATE_IDLE || feedback->m_State[arm].m_ERRCode != 0) {
+      finish_tool_upload(false, "controller no longer healthy/IDLE; motion blocked"); return;
+    }
+    if (age >= sdk_packet_settle_sec_ &&
+      feedback->m_Out[arm].m_OutFrameSerial != tool_upload_->frame &&
+      tool_configuration_matches(tool_upload_->config, feedback->m_In[arm].m_ToolKine,
+        feedback->m_In[arm].m_ToolDyn))
+    {finish_tool_upload(true, "fresh controller parameter echo matched; manual tool_dynamics_confirmed unchanged");}
+  }
+
+  void on_configure_tool(std::size_t arm, std_srvs::srv::Trigger::Response::SharedPtr response)
+  {
+    response->success = false;
+    ToolConfiguration config;
+    std::string path = tools_config_file_;
+    try {
+      if (path.empty()) {
+        path = ament_index_cpp::get_package_share_directory("tianji_io_teleop_bridge") + "/config/tools_cfg.json";
+      }
+      config = load_tool_configuration(path, arm); // Read current_tool on each call.
+    } catch (const std::exception & error) {
+      response->message = std::string("refused: tool file invalid: ") + error.what(); return;
+    }
+    const std::string details = describe_tool_configuration(arm, config) + " source=" + path;
+    if (tool_config_dry_run_) {
+      response->success = true;
+      response->message = "DRY_RUN: no SDK write; " + details;
+      if (!tool_upload_) {publish_tool_status(response->message);}
+      return;
+    }
+    if (!allow_motion_ || !sdk_control_compatibility_confirmed_ ||
+      !(arm == 0 ? left_enabled(enabled_arms_) : right_enabled(enabled_arms_)))
+    {
+      response->message = "refused: require allow_motion, SDK compatibility and enabled arm"; return;
+    }
+    if (control_gate_.state() != ControlState::kMonitor || control_engaged_ ||
+      idle_retry_pending_ || tool_upload_)
+    {response->message = "refused: require MONITOR with no active operation or pending packet"; return;}
+    const auto now_steady = std::chrono::steady_clock::now();
+    if (!sdk_.connected() || !have_feedback_ || !feedback_is_finite(latest_dcss_) ||
+      std::chrono::duration<double>(now_steady - last_feedback_receive_).count() > feedback_timeout_sec_)
+    {response->message = "refused: fresh finite feedback required"; return;}
+    for (std::size_t a = 0; a < 2; ++a) {
+      if (!frame_advanced_once_[a] ||
+        std::chrono::duration<double>(now_steady - last_feedback_advance_[a]).count() > feedback_timeout_sec_ ||
+        latest_dcss_.m_State[a].m_CurState != ARM_STATE_IDLE || latest_dcss_.m_State[a].m_ERRCode != 0)
+      {response->message = "refused: both arms must have fresh healthy IDLE feedback"; return;}
+      for (std::size_t j = 0; j < 7; ++j) {
+        if (std::abs(latest_dcss_.m_Out[a].m_FB_Joint_Vel[j]) > 0.5) {
+          response->message = "refused: both arms must be stationary"; return;
+        }
+      }
+    }
+    const auto sent = sdk_.configure_tool(arm, config);
+    if (sent == TargetSendResult::kBusy) {
+      response->message = "refused: " + sdk_.last_error(); return;
+    }
+    tool_configuration_uncertain_arms_[arm] = true; // Sending is not confirmation, including send errors.
+    if (sent != TargetSendResult::kSubmitted) {
+      response->message = "UNCONFIRMED: " + sdk_.last_error() + "; motion blocked; " + details;
+      publish_tool_status(response->message); return;
+    }
+    tool_upload_ = ToolUpload{arm, config, std::chrono::steady_clock::now(),
+      latest_dcss_.m_Out[arm].m_OutFrameSerial};
+    response->success = true;
+    response->message = "SENT_PENDING_ECHO: not yet verified; " + details;
+    publish_tool_status(response->message);
+  }
+
+  void on_retreat(std::size_t arm, std_srvs::srv::Trigger::Response::SharedPtr response)
+  {
+    response->success = false;
+    if (tool_upload_ || tool_configuration_uncertain()) {
+      response->message = "refused: tool upload pending/unconfirmed"; return;
+    }
+    if (!allow_motion_ || !sdk_control_compatibility_confirmed_ || !tool_dynamics_confirmed_) {
+      response->message = "refused: motion permission, SDK compatibility and tool dynamics confirmation required";
+      return;
+    }
+    if (arm > 1 || !(arm == 0 ? left_enabled(enabled_arms_) : right_enabled(enabled_arms_)) ||
+      control_gate_.state() != ControlState::kMonitor || control_engaged_ || idle_retry_pending_)
+    {
+      response->message = "refused: requested arm must be enabled, with MONITOR and no active control or pending idle";
+      return;
+    }
+    const auto fresh = [this, arm]() {
+        const auto now = std::chrono::steady_clock::now();
+        if (!sdk_.connected() || !have_feedback_ || !feedback_is_finite(latest_dcss_) ||
+          std::chrono::duration<double>(now - last_feedback_receive_).count() > feedback_timeout_sec_)
+        {return false;}
+        for (std::size_t arm = 0; arm < 2; ++arm) {
+          if (!frame_advanced_once_[arm] ||
+            std::chrono::duration<double>(now - last_feedback_advance_[arm]).count() > feedback_timeout_sec_)
+          {return false;}
+        }
+        return latest_dcss_.m_State[arm].m_CurState != ARM_STATE_ERROR &&
+               latest_dcss_.m_State[arm].m_ERRCode == 0;
+      };
+    if (!fresh()) {response->message = "refused: fresh healthy feedback required"; return;}
+    for (std::size_t j = 0; j < 7; ++j) {
+      if (std::abs(latest_dcss_.m_Out[arm].m_FB_Joint_Vel[j]) > 0.5) {
+        response->message = "refused: requested arm must be stationary (<0.5 deg/s)"; return;
+      }
+    }
+    try {
+      if (!kinematics_.initialized()) {initialize_kinematics();}
+    } catch (const std::exception & error) {
+      response->message = std::string("refused: ") + error.what(); return;
+    }
+    const auto limits = inspect_joint_limit_margin(latest_feedback_rad_, joint_limit_safety_margin_rad_);
+    if (!fresh() || !limits.valid || !limits.arm_safe[arm]) {
+      response->message = "refused: feedback expired or current joints outside planning margin"; return;
+    }
+    impedance_configuration_phase_ = ImpedanceConfigurationPhase::kNone;
+    clear_soft_limit_state();
+    target_send_guard_.reset();
+    last_submitted_target_rad_.reset();
+    retreat_arm_ = arm;
+    retreat_control_arms_ = arm == 0 ? EnabledArms::kLeft : EnabledArms::kRight;
+    control_purpose_ = arm == 0 ? ControlPurpose::kRetreatLeft : ControlPurpose::kRetreatRight;
+    control_gate_.request_enable();
+    response->success = true;
+    response->message = std::string("accepted: prepare impedance, plan from current pose, then send ") +
+      retreat_arm_name() + "-arm -X 100 mm path; not collision checked";
+  }
+
   void on_move_to_initial_pose(
     const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
     std::shared_ptr<std_srvs::srv::Trigger::Response> response)
   {
     (void)request;
+    if (tool_upload_ || tool_configuration_uncertain()) {
+      response->success = false;
+      response->message = "refused: tool upload pending/unconfirmed"; return;
+    }
     if (!allow_motion_) {
       response->message = "refused: allow_motion is false";
     } else if (control_gate_.state() != ControlState::kMonitor || control_engaged_) {
@@ -1508,6 +2054,7 @@ private:
       impedance_configuration_phase_ = ImpedanceConfigurationPhase::kNone;
       clear_soft_limit_state();
       control_purpose_ = ControlPurpose::kInitialPose;
+      last_submitted_target_rad_.reset();
       initial_pose_stable_frames_ = 0;
       control_gate_.request_enable();
       response->success = true;
@@ -1525,6 +2072,35 @@ private:
     result.key = key;
     result.value = value;
     return result;
+  }
+
+  double displayed_alignment_tolerance() const
+  {
+    if (control_gate_.state() == ControlState::kSoftLimitHold) {
+      return soft_limit_recovery_alignment_rad_;
+    }
+    return control_gate_.state() == ControlState::kCommandWait ?
+           command_recovery_alignment_rad_ : initial_alignment_tolerance_rad_;
+  }
+
+  double displayed_alignment_margin() const
+  {
+    return (control_gate_.state() == ControlState::kCommandWait ||
+           control_gate_.state() == ControlState::kSoftLimitHold) ?
+           soft_limit_release_margin_rad_ : joint_limit_safety_margin_rad_;
+  }
+
+  std::size_t displayed_stable_frames() const
+  {
+    return control_gate_.state() == ControlState::kSoftLimitHold ?
+           control_gate_.soft_limit_recovery_frames() : control_gate_.aligned_frames();
+  }
+
+  std::size_t displayed_required_frames() const
+  {
+    return control_gate_.state() == ControlState::kSoftLimitHold ?
+           static_cast<std::size_t>(soft_limit_recovery_frames_) :
+           static_cast<std::size_t>(alignment_required_frames_);
   }
 
   static std::string format_decimal(double value, int precision = 5)
@@ -1559,11 +2135,11 @@ private:
     const bool command_fresh = command_time.has_value() &&
       std::chrono::duration<double>(now_steady - command_time.value()).count() <=
       command_timeout_sec_;
-    const bool feedback_fresh = have_feedback && sdk_.connected() &&
+    const bool feedback_fresh = have_feedback && !feedback_recovery_frames_ && sdk_.connected() &&
       std::chrono::duration<double>(now_steady - last_feedback_receive_).count() <=
       feedback_timeout_sec_;
     const auto limit_result = inspect_joint_limit_margin(
-      command, joint_limit_safety_margin_rad_);
+      command, displayed_alignment_margin());
     const auto enabled = enabled_arm_mask();
 
     std::size_t aligned_count = 0;
@@ -1585,7 +2161,7 @@ private:
         limit_result.joint_safe[index];
       all_limits_safe = all_limits_safe && limit_safe;
       if (command_fresh && feedback_fresh && limit_safe &&
-        error <= initial_alignment_tolerance_rad_)
+        error <= displayed_alignment_tolerance())
       {
         ++aligned_count;
       }
@@ -1593,7 +2169,10 @@ private:
 
     std::string block_reason = "ALIGNED";
     uint8_t summary_level = diagnostic_msgs::msg::DiagnosticStatus::OK;
-    if (!command_fresh) {
+    if (feedback_recovery_frames_) {
+      block_reason = "WAITING_FOR_FEEDBACK";
+      summary_level = diagnostic_msgs::msg::DiagnosticStatus::STALE;
+    } else if (!command_fresh) {
       block_reason = "WAITING_FOR_COMMAND";
       summary_level = diagnostic_msgs::msg::DiagnosticStatus::STALE;
     } else if (!feedback_fresh) {
@@ -1605,8 +2184,10 @@ private:
     } else if (aligned_count != enabled_count) {
       block_reason = "WAITING_FOR_ALIGNMENT";
       summary_level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
-    } else if (control_gate_.state() == ControlState::kWaitingForAlignment &&
-      control_gate_.aligned_frames() < static_cast<std::size_t>(alignment_required_frames_))
+    } else if ((control_gate_.state() == ControlState::kWaitingForAlignment ||
+      control_gate_.state() == ControlState::kCommandWait ||
+      control_gate_.state() == ControlState::kSoftLimitHold) &&
+      displayed_stable_frames() < displayed_required_frames())
     {
       block_reason = "WAITING_FOR_STABLE_FRAMES";
     }
@@ -1622,17 +2203,18 @@ private:
       diagnostic_value(
         "control_state", control_state_name(control_gate_.state())));
     summary.values.push_back(diagnostic_value("enabled_arms", enabled_arms_text_));
+    summary.values.push_back(diagnostic_value("control_reason", control_gate_.reason()));
     summary.values.push_back(diagnostic_value("aligned_joints", std::to_string(aligned_count)));
     summary.values.push_back(diagnostic_value("enabled_joints", std::to_string(enabled_count)));
     summary.values.push_back(
       diagnostic_value(
-        "aligned_frames", std::to_string(control_gate_.aligned_frames())));
+        "aligned_frames", std::to_string(displayed_stable_frames())));
     summary.values.push_back(
       diagnostic_value(
-        "required_frames", std::to_string(alignment_required_frames_)));
+        "required_frames", std::to_string(displayed_required_frames())));
     summary.values.push_back(
       diagnostic_value(
-        "tolerance_rad", format_decimal(initial_alignment_tolerance_rad_)));
+        "tolerance_rad", format_decimal(displayed_alignment_tolerance())));
     summary.values.push_back(
       diagnostic_value(
         "command_fresh", command_fresh ? "true" : "false"));
@@ -1662,7 +2244,7 @@ private:
       const double absolute_error = std::abs(signed_error);
       const bool limit_safe = limit_result.valid && limit_result.joint_safe[index];
       const bool aligned = joint_enabled && command_fresh && feedback_fresh && limit_safe &&
-        absolute_error <= initial_alignment_tolerance_rad_;
+        absolute_error <= displayed_alignment_tolerance();
 
       if (!joint_enabled) {
         joint_status.level = diagnostic_msgs::msg::DiagnosticStatus::OK;
@@ -1717,15 +2299,28 @@ private:
             tianji_io_teleop_bridge::radians_to_degrees(absolute_error), 2)));
       joint_status.values.push_back(
         diagnostic_value(
-          "tolerance_rad", format_decimal(initial_alignment_tolerance_rad_)));
+          "tolerance_rad", format_decimal(displayed_alignment_tolerance())));
       joint_status.values.push_back(
         diagnostic_value(
           "safe_lower_rad",
-          format_decimal(lower_limits_rad()[index] + joint_limit_safety_margin_rad_)));
+          format_decimal(lower_limits_rad()[index] + displayed_alignment_margin())));
       joint_status.values.push_back(
         diagnostic_value(
           "safe_upper_rad",
-          format_decimal(upper_limits_rad()[index] - joint_limit_safety_margin_rad_)));
+          format_decimal(upper_limits_rad()[index] - displayed_alignment_margin())));
+      // Explicit display-only ranges, sourced from the same model/parameters as control.
+      joint_status.values.push_back(diagnostic_value(
+          "hard_lower_rad", format_decimal(lower_limits_rad()[index])));
+      joint_status.values.push_back(diagnostic_value(
+          "hard_upper_rad", format_decimal(upper_limits_rad()[index])));
+      joint_status.values.push_back(diagnostic_value(
+          "soft_lower_rad", format_decimal(lower_limits_rad()[index] + joint_limit_safety_margin_rad_)));
+      joint_status.values.push_back(diagnostic_value(
+          "soft_upper_rad", format_decimal(upper_limits_rad()[index] - joint_limit_safety_margin_rad_)));
+      joint_status.values.push_back(diagnostic_value(
+          "release_lower_rad", format_decimal(lower_limits_rad()[index] + soft_limit_release_margin_rad_)));
+      joint_status.values.push_back(diagnostic_value(
+          "release_upper_rad", format_decimal(upper_limits_rad()[index] - soft_limit_release_margin_rad_)));
       array.status.push_back(joint_status);
     }
     alignment_diagnostics_publisher_->publish(array);
@@ -1757,12 +2352,12 @@ private:
       }
     }
     const bool command_fresh = command_age >= 0.0 && command_age <= command_timeout_sec_;
-    const bool feedback_fresh = have_feedback && sdk_.connected() &&
+    const bool feedback_fresh = have_feedback && !feedback_recovery_frames_ && sdk_.connected() &&
       std::chrono::duration<double>(now_steady - last_feedback_receive_).count() <=
       feedback_timeout_sec_;
     if (command_fresh && feedback_fresh && enabled_arms_ != EnabledArms::kNone) {
       const auto enabled = enabled_arm_mask();
-      const auto limits = inspect_joint_limit_margin(command, joint_limit_safety_margin_rad_);
+      const auto limits = inspect_joint_limit_margin(command, displayed_alignment_margin());
       alignment_limits_safe = enabled_arms_are_safe(limits);
       for (std::size_t index = 0; index < kJointCount; ++index) {
         if (!enabled[index / kArmDof]) {
@@ -1774,13 +2369,15 @@ private:
           alignment_error = error;
           alignment_max_joint = joint_names()[index];
         }
-        if (limits.joint_safe[index] && error <= initial_alignment_tolerance_rad_) {
+        if (limits.joint_safe[index] && error <= displayed_alignment_tolerance()) {
           ++aligned_joints;
         }
       }
     }
     std::string alignment_block_reason = "ALIGNED";
-    if (!command_fresh) {
+    if (feedback_recovery_frames_) {
+      alignment_block_reason = "WAITING_FOR_FEEDBACK";
+    } else if (!command_fresh) {
       alignment_block_reason = "WAITING_FOR_COMMAND";
     } else if (!feedback_fresh) {
       alignment_block_reason = "WAITING_FOR_FEEDBACK";
@@ -1788,8 +2385,10 @@ private:
       alignment_block_reason = "WAITING_FOR_SAFE_LIMIT";
     } else if (aligned_joints != enabled_joints) {
       alignment_block_reason = "WAITING_FOR_ALIGNMENT";
-    } else if (control_gate_.state() == ControlState::kWaitingForAlignment &&
-      control_gate_.aligned_frames() < static_cast<std::size_t>(alignment_required_frames_))
+    } else if ((control_gate_.state() == ControlState::kWaitingForAlignment ||
+      control_gate_.state() == ControlState::kCommandWait ||
+      control_gate_.state() == ControlState::kSoftLimitHold) &&
+      displayed_stable_frames() < displayed_required_frames())
     {
       alignment_block_reason = "WAITING_FOR_STABLE_FRAMES";
     }
@@ -1798,6 +2397,9 @@ private:
       " reason=\"" << control_gate_.reason() << "\"" <<
       " motion_lock=" << (allow_motion_ ? "off" : "on") <<
       " enabled_arms=" << enabled_arms_text_ <<
+      " control_arms=" << arm_mask_name(enabled_arm_mask()) <<
+      " tool_config_pending=" << (tool_upload_ ? "true" : "false") <<
+      " tool_config_uncertain=" << (tool_configuration_uncertain() ? "true" : "false") <<
       " soft_limit_frozen_arms=" << arm_mask_name(soft_limit_frozen_arms_) <<
       " soft_limit_recovery_frames=" << control_gate_.soft_limit_recovery_frames() <<
       " config_phase=" << impedance_phase_name(impedance_configuration_phase_) <<
@@ -1812,13 +2414,29 @@ private:
       " command_age_sec=" << std::fixed << std::setprecision(3) << command_age <<
       " accepted=" << accepted_command_count_ <<
       " ignored_non_arm=" << ignored_non_arm_count_ <<
-      " rejected_arm=" << rejected_command_count_;
+      " rejected_arm=" << rejected_command_count_ <<
+      " sdk_target_busy_timeout_sec=" << sdk_target_busy_timeout_sec_ <<
+      " " << send_timing_.describe(std::chrono::steady_clock::now());
     std_msgs::msg::String status;
     status.data = stream.str();
     status_publisher_->publish(status);
   }
 
   std::string robot_ip_;
+  std::string tools_config_file_;
+  bool tool_config_dry_run_{true};
+  std::array<bool, 2> tool_configuration_uncertain_arms_{};
+  double tool_config_timeout_sec_{2.0};
+  struct ToolUpload
+  {
+    std::size_t arm;
+    ToolConfiguration config;
+    std::chrono::steady_clock::time_point started;
+    int32_t frame;
+  };
+  std::optional<ToolUpload> tool_upload_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr tool_status_publisher_;
+  std::array<rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr, 2> tool_services_;
   std::string state_topic_;
   std::string command_topic_;
   std::string left_cartesian_disturbance_topic_;
@@ -1843,8 +2461,11 @@ private:
   double soft_limit_release_margin_rad_{0.03};
   double soft_limit_recovery_alignment_rad_{0.10};
   double max_following_error_rad_{0.25};
+  double retreat_duration_sec_{10.0}, retreat_period_sec_{0.01};
   double mode_transition_timeout_sec_{2.0};
   double sdk_packet_settle_sec_{0.25};
+  double sdk_target_busy_timeout_sec_{0.1};
+  double command_recovery_alignment_rad_{0.1};
   double hold_duration_sec_{0.5};
   double initial_pose_tolerance_rad_{0.02};
   double initial_pose_timeout_sec_{45.0};
@@ -1880,6 +2501,12 @@ private:
   JointArray max_velocity_rad_s_{};
   JointArray max_acceleration_rad_s2_{};
   JointArray initial_pose_rad_{};
+  RetreatCheck retreat_plan_;
+  std::size_t retreat_arm_{1};
+  std::optional<EnabledArms> retreat_control_arms_;
+  bool retreat_completion_pending_{false};
+  std::chrono::steady_clock::time_point retreat_started_{}, retreat_next_{};
+  std::size_t retreat_index_{0};
   JointArray latest_feedback_rad_{};
   JointArray last_valid_command_rad_{};
   JointArray last_sent_target_rad_{};
@@ -1895,7 +2522,8 @@ private:
   std::chrono::steady_clock::time_point transition_started_{};
   std::chrono::steady_clock::time_point hold_started_{};
   std::chrono::steady_clock::time_point initial_pose_started_{};
-  std::chrono::steady_clock::time_point next_control_cycle_{};
+  CompletionPacer control_pacer_;
+  SendTiming send_timing_;
   std::chrono::steady_clock::time_point last_control_update_{};
   std::chrono::steady_clock::time_point last_status_publish_{};
   std::chrono::steady_clock::time_point last_alignment_diagnostics_publish_{};
@@ -1908,6 +2536,11 @@ private:
     ImpedanceConfigurationPhase::kNone};
   ControlPurpose control_purpose_{ControlPurpose::kNone};
   JointSlewLimiter slew_limiter_;
+  TargetSendGuard target_send_guard_;
+  std::optional<JointArray> last_submitted_target_rad_;
+  std::optional<JointArray> command_wait_target_rad_;
+  std::optional<std::array<int32_t, 2>> feedback_recovery_frames_;
+  std::uint64_t last_recovery_command_count_{0};
   MarvinSdkAdapter sdk_;
   MarvinKinematicsAdapter kinematics_;
   std::mutex data_mutex_;
@@ -1929,6 +2562,8 @@ private:
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr command_subscription_;
   rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr control_service_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr initial_pose_service_;
+  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr retreat_service_;
+  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr retreat_left_service_;
   rclcpp::TimerBase::SharedPtr timer_;
 };
 

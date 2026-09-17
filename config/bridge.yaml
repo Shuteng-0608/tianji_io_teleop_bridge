@@ -1,6 +1,11 @@
 tianji_marvin_teleop_bridge:
   ros__parameters:
     robot_ip: "192.168.1.190"
+    # Review-only by default: neither startup nor service preview writes tool parameters.
+    # Empty path explicitly selects the bundled config/tools_cfg.json snapshot.
+    tools_config_file: "/home/stw/TJ_FX_ROBOT_CONTRL_SDK/MarvinPlatform_EN/tools_cfg.json"
+    tool_config_dry_run: true
+    tool_config_timeout_sec: 2.0
     state_topic: "/io_teleop/joint_states"
     command_topic: "/io_teleop/joint_cmd"
     # Disabled by default: no Cartesian Wrench publishers or calculations are created.
@@ -15,18 +20,22 @@ tianji_marvin_teleop_bridge:
     kinematics_config_file: ""
     alignment_diagnostics_topic: "~/alignment_status"
     publish_rate_hz: 100.0
-    # Control/SDK target packets remain at 100 Hz even if state publishing is raised.
+    # Control ceiling 100 Hz, paced from completion even if state publishing is raised.
     control_rate_hz: 100.0
+    # Both retreat_left_10cm and retreat_right_10cm use this smooth-motion duration.
+    retreat_duration_sec: 10.0
     alignment_diagnostics_rate_hz: 10.0
     feedback_timeout_sec: 0.2
     command_timeout_sec: 0.15
+    # COMMAND_WAIT recovery tolerance; preserves mode/target while waiting for fresh input.
+    command_recovery_alignment_rad: 0.10
     reconnect_period_sec: 2.0
 
-    # Four independent motion gates. These safe defaults cannot send a Marvin control command.
+    # Explicit motion permission and confirmations remain required; startup does not move.
     allow_motion: false
     sdk_control_compatibility_confirmed: false
     tool_dynamics_confirmed: false
-    enabled_arms: "none"  # none, left, right, or both
+    enabled_arms: "both"  # Each retreat service controls ONLY its named arm.
 
     subscribe_joint_commands: true
     command_reference_timeout_sec: 0.2
@@ -47,6 +56,10 @@ tianji_marvin_teleop_bridge:
     mode_transition_timeout_sec: 2.0
     # Marvin's official impedance example leaves 200 ms between control packets.
     sdk_packet_settle_sec: 0.25
+    # 100 ms retry window. Tianji reports holding the last target without timeout exit.
+    # Teleoperation expiry -> COMMAND_WAIT, not IDLE; recovery requires realignment.
+    # Other SDK send errors and initial-pose/manual-stop fault handling are unchanged.
+    sdk_target_busy_timeout_sec: 0.1
     hold_duration_sec: 0.5
 
     # One-shot initial-pose service target, in canonical joint order and degrees:
@@ -63,8 +76,9 @@ tianji_marvin_teleop_bridge:
     left_joint_damping:    [0.35, 0.35, 0.35, 0.30, 0.25, 0.25, 0.25]
     right_joint_stiffness: [2.5, 2.5, 2.5, 2.0, 1.5, 1.2, 1.0]
     right_joint_damping:   [0.35, 0.35, 0.35, 0.30, 0.25, 0.25, 0.25]
-    velocity_ratio: 10
-    acceleration_ratio: 10
+    # Match the commissioned dual-arm and retreat profiles; software limits remain active.
+    velocity_ratio: 50
+    acceleration_ratio: 50
 
     # Software target slew limits, independent of the Marvin percentage limits.
     max_command_velocity_rad_s: [0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25,

@@ -115,17 +115,22 @@ bool MarvinSdkAdapter::enter_joint_impedance_mode(EnabledArms arms)
   return true;
 }
 
-bool MarvinSdkAdapter::send_joint_targets(
+TargetSendResult MarvinSdkAdapter::send_joint_targets(
   EnabledArms arms, const JointArray & positions_deg)
 {
   if (!connected_) {
-    return fail("joint target requested while SDK is disconnected");
+    fail("joint target requested while SDK is disconnected");
+    return TargetSendResult::kError;
   }
   if (arms == EnabledArms::kNone) {
-    return fail("joint target requested with no enabled arms");
+    fail("joint target requested with no enabled arms");
+    return TargetSendResult::kError;
   }
   if (!OnClearSet()) {
-    return fail("OnClearSet failed before joint target packet");
+    // For the checksum-pinned SDK this means the previous packet is still busy.
+    // No target has been staged: do not discard or overwrite the pending packet.
+    fail("OnClearSet busy before joint target packet");
+    return TargetSendResult::kBusy;
   }
 
   if (left_enabled(arms)) {
@@ -133,7 +138,8 @@ bool MarvinSdkAdapter::send_joint_targets(
     std::copy_n(positions_deg.begin(), kArmDof, left.begin());
     if (!OnSetJointCmdPos_A(left.data())) {
       discard_pending_packet();
-      return fail("OnSetJointCmdPos_A failed");
+      fail("OnSetJointCmdPos_A failed");
+      return TargetSendResult::kError;
     }
   }
   if (right_enabled(arms)) {
@@ -141,14 +147,17 @@ bool MarvinSdkAdapter::send_joint_targets(
     std::copy_n(positions_deg.begin() + kArmDof, kArmDof, right.begin());
     if (!OnSetJointCmdPos_B(right.data())) {
       discard_pending_packet();
-      return fail("OnSetJointCmdPos_B failed");
+      fail("OnSetJointCmdPos_B failed");
+      return TargetSendResult::kError;
     }
   }
   if (!OnSetSend()) {
     discard_pending_packet();
-    return fail("OnSetSend failed for joint target packet");
+    fail("OnSetSend failed for joint target packet");
+    return TargetSendResult::kError;
   }
-  return true;
+  last_error_.clear();
+  return TargetSendResult::kSubmitted;
 }
 
 bool MarvinSdkAdapter::request_idle(EnabledArms arms)
@@ -172,6 +181,32 @@ bool MarvinSdkAdapter::request_idle(EnabledArms arms)
     return fail("OnSetSend failed for idle request");
   }
   return true;
+}
+
+TargetSendResult MarvinSdkAdapter::configure_tool(std::size_t arm, const ToolConfiguration & config)
+{
+  if (!connected_ || arm > 1 || !valid_tool_configuration(config)) {
+    fail("tool configuration requires connected SDK, valid arm and parameters");
+    return TargetSendResult::kError;
+  }
+  if (!OnClearSet()) {
+    fail("OnClearSet busy before tool packet; nothing staged");
+    return TargetSendResult::kBusy;
+  }
+  auto kine = config.kine;
+  auto dyn = config.dyn;
+  if (!(arm == 0 ? OnSetTool_A(kine.data(), dyn.data()) : OnSetTool_B(kine.data(), dyn.data()))) {
+    discard_pending_packet();
+    fail("failed to stage tool parameters; controller state not confirmed");
+    return TargetSendResult::kError;
+  }
+  if (!OnSetSend()) {
+    discard_pending_packet();
+    fail("tool send failed; controller state not confirmed");
+    return TargetSendResult::kError;
+  }
+  last_error_.clear();
+  return TargetSendResult::kSubmitted;
 }
 
 bool MarvinSdkAdapter::fail(const std::string & message)

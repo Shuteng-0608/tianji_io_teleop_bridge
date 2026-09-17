@@ -1,6 +1,11 @@
 tianji_marvin_teleop_bridge:
   ros__parameters:
     robot_ip: "192.168.1.190"
+    # Commissioning: services may upload tools when motion/feedback gates pass; no startup upload.
+    # Empty path explicitly selects the bundled config/tools_cfg.json snapshot.
+    tools_config_file: "/home/stw/TJ_FX_ROBOT_CONTRL_SDK/MarvinPlatform_EN/tools_cfg.json"
+    tool_config_dry_run: false
+    tool_config_timeout_sec: 2.0
     state_topic: "/io_teleop/joint_states"
     command_topic: "/io_teleop/joint_cmd"
     # Disabled by default: no Cartesian Wrench publishers or calculations are created.
@@ -14,23 +19,28 @@ tianji_marvin_teleop_bridge:
     # Empty selects the validated ccs_m6_40.MvKDCfg installed with this package.
     kinematics_config_file: ""
     alignment_diagnostics_topic: "~/alignment_status"
-    # High-rate feedback publishing test; control target packets stay at 100 Hz.
-    publish_rate_hz: 500.0
+    # High-rate feedback; control ceiling 100 Hz, paced from each cycle's completion.
+    publish_rate_hz: 300.0
     control_rate_hz: 100.0
+    # Shared smooth duration for retreat_left_10cm / retreat_right_10cm.
+    retreat_duration_sec: 10.0
     alignment_diagnostics_rate_hz: 10.0
     feedback_timeout_sec: 0.2
     command_timeout_sec: 0.15
+    # Invalid/stale teleop input keeps impedance/last submitted target, no automatic IDLE.
+    # Resume after alignment_required_frames fresh checked commands within this feedback error.
+    command_recovery_alignment_rad: 0.2
     reconnect_period_sec: 2.0
 
-    # Dual-arm commissioning profile. The launch-level allow_motion gate still defaults to false.
+    # Historical dual-arm filename; currently RIGHT only. Launch allow_motion defaults to false.
     allow_motion: false
     sdk_control_compatibility_confirmed: true
     tool_dynamics_confirmed: true
-    enabled_arms: "both"  # none, left, right, or both
+    enabled_arms: "right"  # none, left, right, or both
 
     subscribe_joint_commands: true
     command_reference_timeout_sec: 0.2
-    max_command_step_rad: 0.05
+    max_command_step_rad: 0.2
     initial_alignment_tolerance_rad: 0.25
     alignment_required_frames: 20
     joint_limit_tolerance_rad: 0.0001
@@ -48,6 +58,10 @@ tianji_marvin_teleop_bridge:
     mode_transition_timeout_sec: 2.0
     # Marvin's official impedance example leaves 200 ms between control packets.
     sdk_packet_settle_sec: 0.25
+    # 100 ms retry window. Tianji reports holding the last target without timeout exit.
+    # Teleoperation expiry -> COMMAND_WAIT, not IDLE; recovery requires realignment.
+    # Other SDK send errors and initial-pose/manual-stop fault handling are unchanged.
+    sdk_target_busy_timeout_sec: 0.1
     hold_duration_sec: 0.5
 
     # One-shot initial-pose service target, in canonical joint order and degrees:

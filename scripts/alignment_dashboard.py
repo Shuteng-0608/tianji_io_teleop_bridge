@@ -126,7 +126,7 @@ class AlignmentDashboard(Node):
         reason_color = '32' if reason == 'ALIGNED' else '33;1'
 
         lines = [
-            self._paint('天机双臂遥操作 — 启动对齐面板', '36;1'),
+            self._paint('天机双臂遥操作 — 启动/恢复对齐面板', '36;1'),
             (
                 f'状态: {state:<22}  结果: {self._paint(reason, reason_color)}  '
                 f'诊断延迟: {age:0.2f}s'

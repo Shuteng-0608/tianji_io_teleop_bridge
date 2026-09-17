@@ -6,6 +6,8 @@
 
 #include "MarvinSDK.h"
 #include "tianji_io_teleop_bridge/joint_model.hpp"
+#include "tianji_io_teleop_bridge/target_send_guard.hpp"
+#include "tianji_io_teleop_bridge/tool_configuration.hpp"
 
 namespace tianji_io_teleop_bridge
 {
@@ -49,8 +51,9 @@ public:
     EnabledArms arms,
     const JointImpedanceSettings & settings);
   bool enter_joint_impedance_mode(EnabledArms arms);
-  bool send_joint_targets(EnabledArms arms, const JointArray & positions_deg);
+  TargetSendResult send_joint_targets(EnabledArms arms, const JointArray & positions_deg);
   bool request_idle(EnabledArms arms);
+  TargetSendResult configure_tool(std::size_t arm, const ToolConfiguration & config);
 
   bool connected() const {return connected_;}
   const std::string & last_error() const {return last_error_;}

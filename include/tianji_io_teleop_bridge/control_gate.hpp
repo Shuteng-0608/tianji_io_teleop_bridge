@@ -14,8 +14,11 @@ enum class ControlState
   kConfiguringImpedance,
   kWaitingForAlignment,
   kReturningToInitialPose,
+  kRetreating,
+  kRetreatHold,
   kActive,
   kSoftLimitHold,
+  kCommandWait,
   kHold,
   kFault
 };
@@ -33,10 +36,16 @@ inline const char * control_state_name(ControlState state)
       return "WAITING_FOR_ALIGNMENT";
     case ControlState::kReturningToInitialPose:
       return "RETURNING_TO_INITIAL_POSE";
+    case ControlState::kRetreating:
+      return "RETREATING";
+    case ControlState::kRetreatHold:
+      return "RETREAT_HOLD";
     case ControlState::kActive:
       return "ACTIVE";
     case ControlState::kSoftLimitHold:
       return "SOFT_LIMIT_HOLD";
+    case ControlState::kCommandWait:
+      return "COMMAND_WAIT";
     case ControlState::kHold:
       return "HOLD";
     case ControlState::kFault:
@@ -72,7 +81,7 @@ public:
 
   bool observe_alignment(bool ready)
   {
-    if (state_ != ControlState::kWaitingForAlignment) {
+    if (state_ != ControlState::kWaitingForAlignment && state_ != ControlState::kCommandWait) {
       return false;
     }
     aligned_frames_ = ready ? aligned_frames_ + 1 : 0;
@@ -83,6 +92,14 @@ public:
   {
     state_ = ControlState::kConfiguringImpedance;
     reason_ = "waiting for Marvin impedance mode confirmation";
+  }
+
+  void enter_command_wait(const std::string & reason)
+  {
+    state_ = ControlState::kCommandWait;
+    aligned_frames_ = 0;
+    soft_limit_recovery_frames_ = 0;
+    reason_ = reason;
   }
 
   void mark_active()
@@ -97,6 +114,9 @@ public:
     state_ = ControlState::kReturningToInitialPose;
     reason_ = "moving enabled arms to configured initial pose";
   }
+
+  void mark_retreating() {state_ = ControlState::kRetreating; reason_ = "retreat 100 mm";}
+  void enter_retreat_hold(const std::string & reason) {state_ = ControlState::kRetreatHold; reason_ = reason;}
 
   void enter_soft_limit_hold(const std::string & reason)
   {

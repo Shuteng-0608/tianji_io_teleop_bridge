@@ -21,6 +21,12 @@ find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(Eigen3 REQUIRED)
+find_package(yaml-cpp REQUIRED)
+if(TARGET yaml-cpp::yaml-cpp)
+  set(TOOL_YAML_TARGET yaml-cpp::yaml-cpp)
+else()
+  set(TOOL_YAML_TARGET yaml-cpp)
+endif()
 
 set(
   MARVIN_SDK_ROOT
@@ -103,18 +109,20 @@ endif()
 
 add_executable(marvin_teleop_bridge_node
   src/marvin_teleop_bridge_node.cpp
+  src/retreat_check.cpp
   src/marvin_kinematics_adapter.cpp
   src/marvin_sdk_adapter.cpp
+  src/tool_configuration.cpp
 )
 target_include_directories(marvin_teleop_bridge_node PRIVATE
   include
   "${MARVIN_SDK_ROOT}"
 )
 target_link_directories(marvin_teleop_bridge_node PRIVATE "${MARVIN_SDK_ROOT}")
-target_link_libraries(marvin_teleop_bridge_node MarvinSDK Kine)
+target_link_libraries(marvin_teleop_bridge_node MarvinSDK Kine ${TOOL_YAML_TARGET})
 ament_target_dependencies(
   marvin_teleop_bridge_node ament_index_cpp diagnostic_msgs geometry_msgs rclcpp sensor_msgs
-  std_msgs std_srvs)
+  std_msgs std_srvs rcl_interfaces)
 target_compile_options(marvin_teleop_bridge_node PRIVATE -Wall -Wextra -Wpedantic)
 set_target_properties(marvin_teleop_bridge_node PROPERTIES
   BUILD_RPATH "${MARVIN_SDK_ROOT}"
@@ -122,6 +130,18 @@ set_target_properties(marvin_teleop_bridge_node PROPERTIES
 )
 
 install(TARGETS marvin_teleop_bridge_node DESTINATION lib/${PROJECT_NAME})
+
+# Read-only planner in its own process; deliberately no link to libMarvinSDK.
+add_executable(retreat_check_node src/retreat_check_node.cpp src/retreat_check.cpp
+  src/marvin_kinematics_adapter.cpp)
+target_include_directories(retreat_check_node PRIVATE include "${MARVIN_SDK_ROOT}")
+target_link_directories(retreat_check_node PRIVATE "${MARVIN_SDK_ROOT}")
+target_link_libraries(retreat_check_node Kine)
+ament_target_dependencies(retreat_check_node ament_index_cpp rclcpp std_srvs sensor_msgs geometry_msgs)
+target_compile_options(retreat_check_node PRIVATE -Wall -Wextra -Wpedantic)
+set_target_properties(retreat_check_node PROPERTIES
+  BUILD_RPATH "${MARVIN_SDK_ROOT}" INSTALL_RPATH "$ORIGIN/..")
+install(TARGETS retreat_check_node DESTINATION lib/${PROJECT_NAME})
 
 # This executable links kinematics only: no Marvin SDK connection/control API.
 add_executable(force_hud_estimator_node
@@ -142,6 +162,9 @@ install(PROGRAMS scripts/alignment_dashboard.py
   DESTINATION lib/${PROJECT_NAME}
   RENAME alignment_dashboard
 )
+install(PROGRAMS scripts/joint_limit_dashboard.py
+  DESTINATION lib/${PROJECT_NAME} RENAME joint_limit_dashboard)
+install(FILES scripts/joint_limit_view.py DESTINATION lib/${PROJECT_NAME})
 install(FILES "${MARVIN_SDK_LIBRARY}" DESTINATION lib)
 install(FILES "${MARVIN_KINEMATICS_LIBRARY}" DESTINATION lib)
 install(FILES "${MARVIN_KINEMATICS_CONFIG}"
@@ -151,8 +174,39 @@ install(DIRECTORY config launch DESTINATION share/${PROJECT_NAME})
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   find_package(ament_cmake_pytest REQUIRED)
+  ament_add_test(test_retreat_service
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/retreat_service_probe.py"
+    TIMEOUT 30 GENERATE_RESULT_FOR_RETURN_CODE_ZERO)
+  ament_add_gtest(test_retreat_check test/test_retreat_check.cpp src/retreat_check.cpp
+    src/marvin_kinematics_adapter.cpp)
+  target_include_directories(test_retreat_check PRIVATE include "${MARVIN_SDK_ROOT}")
+  target_link_directories(test_retreat_check PRIVATE "${MARVIN_SDK_ROOT}")
+  target_link_libraries(test_retreat_check Kine)
+  ament_target_dependencies(test_retreat_check sensor_msgs geometry_msgs)
+  target_compile_definitions(test_retreat_check PRIVATE
+    TIANJI_TEST_KINEMATICS_CONFIG="${MARVIN_KINEMATICS_CONFIG}")
+  ament_add_pytest_test(test_joint_limit_view test/test_joint_limit_view.py
+    APPEND_ENV PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/scripts)
+  # Fault injection: fake all robot-control symbols, never link libMarvinSDK.
+  ament_add_gtest(test_target_send test/test_target_send.cpp
+    src/tool_configuration.cpp
+    src/retreat_check.cpp
+    src/marvin_sdk_adapter.cpp src/marvin_kinematics_adapter.cpp)
+  if(TARGET test_target_send)
+    target_include_directories(test_target_send PRIVATE include "${MARVIN_SDK_ROOT}")
+    target_link_directories(test_target_send PRIVATE "${MARVIN_SDK_ROOT}")
+    target_link_libraries(test_target_send Kine ${TOOL_YAML_TARGET})
+    ament_target_dependencies(test_target_send
+      ament_index_cpp diagnostic_msgs geometry_msgs rclcpp sensor_msgs std_msgs std_srvs rcl_interfaces)
+    target_compile_options(test_target_send PRIVATE -Wall -Wextra -Wpedantic)
+    set_target_properties(test_target_send PROPERTIES BUILD_RPATH "${MARVIN_SDK_ROOT}")
+  endif()
   ament_add_pytest_test(test_force_hud_core test/test_force_hud_core.py
     APPEND_ENV PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/scripts)
+  ament_add_gtest(test_tool_configuration test/test_tool_configuration.cpp src/tool_configuration.cpp)
+  target_include_directories(test_tool_configuration PRIVATE include)
+  target_link_libraries(test_tool_configuration ${TOOL_YAML_TARGET})
+  target_compile_definitions(test_tool_configuration PRIVATE TOOL_TEST_SOURCE="${CMAKE_CURRENT_SOURCE_DIR}")
   ament_add_pytest_test(test_insertion_hud test/test_insertion_hud.py
     APPEND_ENV PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/scripts)
   ament_add_test(test_force_hud_pipeline

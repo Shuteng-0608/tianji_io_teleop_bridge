@@ -16,7 +16,8 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import CompressedImage
 from std_srvs.srv import Trigger
 
-from force_hud_core import AXES, ForceBaseline, HudModel, RingMapping, render_hud
+from force_hud_core import (
+    AXES, ForceBaseline, HudModel, RingMapping, capture_force_baselines, render_hud)
 
 
 class ForceHudNode(Node):
@@ -63,7 +64,7 @@ class ForceHudNode(Node):
         self.baselines = {side: ForceBaseline(zero_window, zero_max_std, self.model.timeout)
                           for side in self.model.arms}
         self.zero_services = []
-        for side in self.model.arms:
+        for side in ("left", "right", "both"):
             self.zero_services.append(self.create_service(
                 Trigger, "~/" + side + "/zero_force",
                 lambda request, response, side=side: self.zero_force(side, response)))
@@ -106,8 +107,10 @@ class ForceHudNode(Node):
             self.baselines[side].observe(view, self.model.stamp_ns)
 
     def zero_force(self, side, response, clear=False):
+        sides = ("left", "right") if side == "both" else (side,)
         if clear:
-            self.baselines[side].clear()
+            for arm in sides:
+                self.baselines[arm].clear()
             response.success = True
             response.message = "display force zero cleared for " + side
             return response
@@ -115,7 +118,7 @@ class ForceHudNode(Node):
         try:
             if self.display_mode != "ring":
                 raise ValueError("force zero is only supported in ring display mode")
-            self.baselines[side].capture(self.model.arms[side], self.model.stamp_ns)
+            capture_force_baselines(self.baselines, self.model.arms, self.model.stamp_ns, sides)
             response.success = True
             response.message = (
                 "display-only force zero captured for " + side +

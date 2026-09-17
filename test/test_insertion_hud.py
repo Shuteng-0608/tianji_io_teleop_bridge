@@ -4,7 +4,8 @@ import cv2
 import numpy as np
 import pytest
 
-from force_hud_core import ArmView, ForceBaseline, HudModel, RingMapping, render_hud
+from force_hud_core import (
+    ArmView, ForceBaseline, HudModel, RingMapping, capture_force_baselines, render_hud)
 
 
 def view(force=(1., 2., 3.), frame="base"):
@@ -70,6 +71,38 @@ def test_manual_zero_preserves_raw_filter_and_other_arm():
     left.clear()
     left.attach(v)
     np.testing.assert_allclose(mapping().project(v), [1, 2, 3])
+
+
+def test_both_zero_keeps_independent_biases_and_shared_capture_stamp():
+    baselines = {side: ForceBaseline() for side in ("left", "right")}
+    left, stamp = populate(baselines["left"], (1., 2., 3.))
+    right, _ = populate(baselines["right"], (-4., 5., 6.))
+    capture_force_baselines(baselines, {"left": left, "right": right}, stamp, ("left", "right"))
+    np.testing.assert_allclose(baselines["left"].bias, [1, 2, 3])
+    np.testing.assert_allclose(baselines["right"].bias, [-4, 5, 6])
+    assert baselines["left"].stamp_ns == baselines["right"].stamp_ns == stamp
+
+
+@pytest.mark.parametrize("failure", ["invalid", "short", "unstable"])
+def test_both_zero_failure_preserves_both_previous_baselines(failure):
+    baselines = {side: ForceBaseline() for side in ("left", "right")}
+    views = {}
+    for side in baselines:
+        views[side], stamp = populate(baselines[side])
+        baselines[side].bias = np.array([7., 8., 9.])
+        baselines[side].stamp_ns = 123
+    if failure == "invalid":
+        views["right"].valid = False
+    elif failure == "short":
+        baselines["right"].samples.clear()
+    else:
+        for i, (t, f) in enumerate(baselines["right"].samples):
+            f[0] = 10. * (i % 2)
+    with pytest.raises(ValueError, match="right:"):
+        capture_force_baselines(baselines, views, stamp, ("left", "right"))
+    for baseline in baselines.values():
+        np.testing.assert_array_equal(baseline.bias, [7, 8, 9])
+        assert baseline.stamp_ns == 123
 
 
 def test_zero_rejects_invalid_short_duplicate_unstable_window():

@@ -22,7 +22,7 @@
   不建立机器人控制连接、不改变原遥操作状态机。见 [HUD使用与验证指南](docs/FORCE_HUD.md)。
 
 > **安全提示**：`config/bridge.yaml` 默认禁止所有运动。`config/bridge_both_test.yaml`
-> 是已经打开部分人工确认门的双臂联调配置，不是无人值守生产配置。首次调试应清空机器人周围区域、
+> 是已经打开部分人工确认门的实机联调配置（当前只启用右臂），不是无人值守生产配置。首次调试应清空机器人周围区域、
 > 准备物理急停，并由熟悉天机控制器的人员在场。
 
 ## 1. 系统数据流
@@ -56,7 +56,7 @@ Joint1_L ... Joint7_L, Joint1_R ... Joint7_R
 
 | 方向 | 名称 | 类型 | 默认频率 | 说明 |
 |---|---|---|---:|---|
-| 发布 | `/io_teleop/joint_states` | `sensor_msgs/msg/JointState` | 默认100 Hz；联调500 Hz | 双臂14关节反馈；`effort` 为 `m_EST_Joint_Force` |
+| 发布 | `/io_teleop/joint_states` | `sensor_msgs/msg/JointState` | 默认100 Hz；当前联调300 Hz | 双臂14关节反馈；`effort` 为 `m_EST_Joint_Force` |
 | 订阅 | `/io_teleop/joint_cmd` | `sensor_msgs/msg/JointState` | 艾欧约100 Hz | 双臂目标角；共享话题中的手指消息会被忽略 |
 | 可选发布 | `~/left/estimated_cartesian_disturbance` | `geometry_msgs/msg/WrenchStamped` | 跟随 `publish_rate_hz` | 左臂法兰处计算得到的等效六维扰动力；默认关闭 |
 | 可选发布 | `~/right/estimated_cartesian_disturbance` | `geometry_msgs/msg/WrenchStamped` | 跟随 `publish_rate_hz` | 右臂法兰处计算得到的等效六维扰动力；默认关闭 |
@@ -81,7 +81,8 @@ MONITOR
        → CONFIGURING_IMPEDANCE
        → WAITING_FOR_ALIGNMENT
        → ACTIVE ←→ SOFT_LIMIT_HOLD
-                    └──────────→ HOLD → MONITOR
+           ├─ 输入无效/超时、反馈暂不可用、SDK暂忙超时 → COMMAND_WAIT ─重新对齐→ ACTIVE
+           └─ 停用/其他保护 → HOLD → IDLE → MONITOR
   └─ move_to_initial_pose
        → PREPARING_PARAMETERS
        → CONFIGURING_IMPEDANCE
@@ -105,14 +106,39 @@ MONITOR
 
 进入 `ACTIVE` 后，下列情况会进入保持/停止路径：
 
-- 有效手臂指令超过 `command_timeout_sec` 未更新；
-- Marvin反馈停止更新、含非有限值或机器人报告错误；
+- 手臂指令被拒绝或有效指令超过 `command_timeout_sec` 未更新：进入 `COMMAND_WAIT`，不自动IDLE；
+- 遥操作中反馈读取失败、反馈帧停止更新或本地快照过期：进入 `COMMAND_WAIT`，不主动请求IDLE；
+- 关节目标包SDK暂忙超过重试期限：进入 `COMMAND_WAIT`，不主动请求IDLE；
+- 反馈含非有限值或机器人报告错误：仍走故障停止；
 - 实际位置相对已发送目标的跟随误差过大；
 - SDK控制报文发送失败；
 - 操作员调用 `enable_control=false`。
 
 目标进入关节软限位时不会立刻退出遥操作，而是进入 `SOFT_LIMIT_HOLD`：默认冻结所有启用手臂，
 目标回到更大的释放裕量、重新对齐并稳定指定帧数后自动恢复 `ACTIVE`。机器人故障和急停错误不会由本节点自动清除。
+
+`COMMAND_WAIT` 处理遥操作输入/反馈暂不可用以及SDK暂忙超时：保持阻抗模式，不发送新的目标或模式报文，
+由控制器保持**最后成功提交的目标**，不追踪最后收到但未实际提交的目标。
+保持目标不等于立即停止在实际位置，机械臂可能仍向最后目标运动。若尚未提交过任何目标，
+等待期间也不会为了“保持”而额外发送位置包。
+等待不受 `hold_duration_sec` 限制；进入等待时结束本轮SDK暂忙重试，不再因旧期限届满而请求IDLE。
+反馈不可用期间禁止目标下发，不使用旧反馈恢复控制，也不自动清除机器人故障或重新使能。
+持续失去反馈时只能保证桥接不主动发送IDLE，**不能确认机器人实际保持状态**；应暂停操作并检查通信，
+必要时使用实机急停。控制器自己的安全保护不受本节点控制。
+
+等待期间仍校验14关节名称、有限值和硬限位，不再用旧的接受目标作跳变基准。
+新目标必须在 `soft_limit_release_margin_rad` 内，并且每个启用关节与实时反馈之差不超过
+`command_recovery_alignment_rad`（默认0.10 rad，约5.73°）。连续检查通过
+`alignment_required_frames`（默认20）条新的有效指令才自动恢复；重复检查同一缓存指令不累计。
+无效、超时或未对齐会打断连续计数；恢复从保持目标开始重新限速，不直接跳向新目标。
+若等待由反馈异常触发，先重新读取并校验反馈，确认双臂反馈帧都相对异常时发生更新，
+丢弃反馈中断期间收到的命令，再开始对新命令累计对齐。机器人错误、模式丢失、
+非有限反馈和跟随误差保护仍保留；SDK暂忙恢复不通过空报文探测，只在重新对齐后受限尝试下发，
+若仍暂忙则跳过更新，期限届满后再次等待。
+对齐面板在COMMAND_WAIT显示恢复容差、限位裕量和计数。纯手指消息仍忽略，不触发等待或计数重置。
+操作员调用 `enable_control=false` 仍进入普通HOLD并请求IDLE；若要回初始姿态，请先停用并等到MONITOR。
+以上“不主动IDLE”的恢复策略仅用于已进入阻抗遥操作的运行/等待阶段，
+不改变参数或模式设置失败、回初始姿态、手动停用以及节点退出的原有停止处理。
 
 `move_to_initial_pose` 与遥操作互斥，只允许从 `MONITOR` 调用。服务返回成功表示任务已被接受，
 不表示机器人已经到位。节点会先配置并确认关节阻抗模式，再从当前反馈位置开始按软件速度和加速度
@@ -153,6 +179,13 @@ MONITOR
 
 ## 5. 配置文件
 
+新增左右臂工具参数服务（**节点默认及 `bridge.yaml` 仅预览，联调配置可真实上传**）：
+`~/configure_left_tool`、`~/configure_right_tool`。默认参数按供应商JSON的 `current_tool` 选择，
+`bridge.yaml` 为 `tool_config_dry_run: true`；`bridge_both_test.yaml` 和
+`bridge_right_retreat_test.yaml` 当前为 `false`，服务在其他准入条件通过后会真实上传。
+启动不会自动上传。参数明细、离线预览及真实下发代码的审核说明见
+[工具配置审核文档](docs/TOOL_CONFIGURATION_REVIEW.md)。这两个服务不自动改变人工 `tool_dynamics_confirmed` 标志。
+
 ### `config/bridge.yaml`
 
 安全默认配置：
@@ -161,31 +194,37 @@ MONITOR
 allow_motion: false
 sdk_control_compatibility_confirmed: false
 tool_dynamics_confirmed: false
-enabled_arms: "none"
+enabled_arms: "both"
+retreat_duration_sec: 10.0
 ```
 
 即使连接机器人，也只能读取反馈、发布状态和检查命令，不会发送模式、阻抗、空闲或关节目标报文。
 
+正式配置集中包含左右臂阻抗参数，以及两个独立的 10 cm 后退服务。运动能力和人工确认仍默认关闭；
+启用后才可控制。`velocity_ratio` / `acceleration_ratio` 配置为50，与已验证的联调配置一致。
+
 ### `config/bridge_both_test.yaml`
 
-双臂实机联调配置：
+实机联调配置（沿用历史文件名，当前仅启用右臂）：
 
 ```yaml
 allow_motion: false
 sdk_control_compatibility_confirmed: true
 tool_dynamics_confirmed: true
-enabled_arms: "both"
+enabled_arms: "right"
+tool_config_dry_run: false
 initial_alignment_tolerance_rad: 0.25
 joint_limit_safety_margin_rad: 0.005
 soft_limit_release_margin_rad: 0.015
-publish_rate_hz: 500.0
+publish_rate_hz: 300.0
 control_rate_hz: 100.0
 ```
 
 配置文件中的 `allow_motion` 仍为 `false`，必须在启动命令中显式传入 `allow_motion:=true` 才能开放运动能力。
 两个 `*_confirmed` 参数是人工确认标志，不会替代实际的SDK兼容性和工具负载检查。
-其中两个限位裕量和500 Hz状态发布是当前双臂联调专用设置；控制状态机及SDK目标下发仍保持
-100 Hz。安全默认配置
+其中两个限位裕量和300 Hz状态发布是当前联调专用设置；控制状态机及SDK目标下发上限仍为
+100 Hz。需要双臂控制时，必须核对两侧条件并显式将本机配置的 `enabled_arms` 改为 `both`；
+该选项不影响双臂14关节状态发布。安全默认配置
 `bridge.yaml` 仍使用 `0.01 rad` 和 `0.03 rad`。URDF硬限位以及
 `joint_limit_tolerance_rad` 均未放宽。
 
@@ -225,7 +264,7 @@ control_rate_hz: 100.0
 | `allow_motion` | `false` | 总运动能力开关；启动参数会覆盖配置文件 |
 | `sdk_control_compatibility_confirmed` | `false` | 人工确认SDK与控制器控制接口兼容 |
 | `tool_dynamics_confirmed` | `false` | 人工确认工具/负载动力学配置 |
-| `enabled_arms` | `none` | `none`、`left`、`right` 或 `both` |
+| `enabled_arms` | `none`（正式配置为`both`） | `none`、`left`、`right` 或 `both` |
 
 四项必须同时允许，`enable_control=true` 才可能成功。连接、反馈和机器人健康检查仍独立生效。
 
@@ -235,10 +274,11 @@ control_rate_hz: 100.0
 |---|---:|---|
 | `feedback_timeout_sec` | `0.2` | 反馈新鲜度上限 |
 | `command_timeout_sec` | `0.15` | `ACTIVE` 后有效手臂命令超时 |
+| `command_recovery_alignment_rad` | `0.10` | COMMAND_WAIT恢复时每个启用关节与反馈最大偏差，不超过跟随误差阈值 |
 | `command_reference_timeout_sec` | `0.2` | 运行中相邻命令参考有效期 |
 | `max_command_step_rad` | `0.05` | `ACTIVE/SOFT_LIMIT_HOLD` 单消息最大跳变 |
 | `initial_alignment_tolerance_rad` | `0.05` | 初次对齐每个启用关节最大误差 |
-| `alignment_required_frames` | `20` | 初次对齐连续帧数 |
+| `alignment_required_frames` | `20` | 初次对齐检查次数；COMMAND_WAIT恢复则需检查通过同样数量的新有效指令 |
 | `joint_limit_tolerance_rad` | `0.0001` | URDF硬限位数值容差 |
 | `joint_limit_safety_margin_rad` | `0.01` | 进入软限位保持的内缩裕量 |
 | `soft_limit_release_margin_rad` | `0.03` | 从软限位保持恢复所需裕量 |
@@ -248,6 +288,7 @@ control_rate_hz: 100.0
 | `max_following_error_rad` | `0.25` | 已发送目标与反馈最大跟随误差 |
 | `mode_transition_timeout_sec` | `2.0` | 参数或模式回显确认超时 |
 | `sdk_packet_settle_sec` | `0.25` | 两个SDK设置报文之间的最小稳定时间 |
+| `sdk_target_busy_timeout_sec` | `0.1` | 从首次关节目标包暂忙开始的重试期限（秒）；遥操作到期转COMMAND_WAIT而非IDLE，不因重复暂忙延长 |
 | `hold_duration_sec` | `0.5` | 进入空闲模式前的短时保持时长 |
 | `initial_pose_deg` | 14维数组 | 一键回初始姿态目标，顺序为左臂7轴后右臂7轴，单位deg |
 | `initial_pose_tolerance_rad` | `0.02` | 判定到达初始姿态的逐关节最大误差 |
@@ -315,7 +356,7 @@ ROS 2 安装完成后执行：
 sudo apt update
 sudo apt install -y \
   git build-essential cmake \
-  python3-rosdep python3-colcon-common-extensions
+  python3-rosdep python3-colcon-common-extensions python3-tk
 
 source /opt/ros/humble/setup.bash
 ```
@@ -332,7 +373,7 @@ rosdep update
 
 ```bash
 mkdir -p "$HOME/tianji_ws/src" "$HOME/tianji_vendor"
-git clone https://github.com/Shuteng-0608/tianji_io_teleop_bridge.git \
+git clone --branch codex/force-feedback-hud https://github.com/Shuteng-0608/tianji_io_teleop_bridge.git \
   "$HOME/tianji_ws/src/tianji_io_teleop_bridge"
 
 # 将供应商的完整 DEMO_C++ 目录复制到新电脑后，指向它：
@@ -539,7 +580,10 @@ PREPARING_PARAMETERS → CONFIGURING_IMPEDANCE
 > 这一阶段会让机器人进入关节阻抗模式并在对齐后执行TeleBox目标。必须清空工作区、
 > 确认工具/负载参数、准备物理急停，并由熟悉天机控制器的人员在场。
 
-将 `bridge_both_test.yaml` 复制到本机配置目录，核对 `robot_ip`、机器人版本、负载和所有限制后启动：
+将 `bridge_both_test.yaml` 复制到本机配置目录，核对 `robot_ip`、机器人版本、负载和所有限制后启动。
+当前仓库版本为 `enabled_arms: right`；以下流程若要控制双臂，须先编辑复制后的配置为 `both`，
+不要仅根据文件名判断控制范围。`tool_config_dry_run: false` 表示工具配置服务可真实上传，
+仅需预览时先改成 `true`。
 
 ```bash
 cp "$HOME/tianji_ws/src/tianji_io_teleop_bridge/config/bridge_both_test.yaml" \
@@ -591,6 +635,76 @@ ros2 service call \
   "{data: false}"
 ```
 
+### 8.7 实时关节位置与限位窗口（只读）
+
+先安全结束当前运行，并启动新版桥接，使新增诊断字段生效。无需开启遥操作，
+`allow_motion:=false` 时也能观察实机位置。另开图形桌面终端：
+
+```bash
+source /opt/ros/humble/setup.bash
+source "$HOME/tianji_ws/install/setup.bash"
+ros2 run tianji_io_teleop_bridge joint_limit_dashboard
+```
+
+窗口约10 Hz刷新，左右臂分别显示7个关节：
+
+- 蓝圆：实机反馈位置；橙三角：**桥接已接受的有效目标**，不是被拒绝的原始指令。
+- 简洁bar视图：每行仅保留关节名、实机角度、位置/目标标记和模型范围端点，全部为角度。
+- 红线是触发边界，绿色区间是更靠内的解除保持范围；刻度按该关节模型上下界线性绘制。
+- 不显示长段说明、逐关节调整建议和稳定计数；窗口标题保留运行状态及过期提示。
+- 反馈或目标不新鲜时隐藏对应标记；灰条表示没有新鲜反馈，不能据此判断实机已停止。
+
+数据只来自桥接的 `~/alignment_status`，范围直接取自桥接模型和运行参数，不在窗口内另写一套限位。
+诊断超过0.5秒未收到、消息时间戳过旧/明显超前，或桥接标记反馈无效时，窗口会提示等待/过期。
+跨电脑运行须保持ROS网络、时钟同步一致。此工具不会创建控制发布器、调用使能服务或连接Marvin SDK；
+关闭窗口不等于停止机器人。小窗口自动改为单列，可用右侧滚动条查看所有关节。
+
+不启动ROS或机器人即可预览合成示例（窗口明确标注演示数据）：
+
+```bash
+ros2 run tianji_io_teleop_bridge joint_limit_dashboard --demo
+```
+
+缺少Tk依赖时安装 `sudo apt install python3-tk`；没有图形桌面时使用原来的
+`ros2 run tianji_io_teleop_bridge alignment_dashboard` 终端面板。
+若窗口提示“限位数据缺失”，请重启新版桥接，不要凭旧数据调整实机。
+
+### 8.8 后退3 cm：仅正逆解检查服务（不会运动）
+
+独立进程只链接 `libKine`，不链接 `libMarvinSDK`，不创建目标发布器或使能客户端。
+只订阅 `/io_teleop/joint_states` 的新鲜14关节反馈；桥接可以用 `allow_motion:=false`。
+不需要停用/重启已有桥接，也不会改变其控制状态。
+
+```bash
+source /opt/ros/humble/setup.bash
+source "$HOME/tianji_ws/install/setup.bash"
+ros2 run tianji_io_teleop_bridge retreat_check_node
+```
+
+另一个终端分别检查左臂、右臂：
+
+```bash
+ros2 service call /tianji_retreat_check/retreat_left std_srvs/srv/Trigger '{}'
+ros2 service call /tianji_retreat_check/retreat_right std_srvs/srv/Trigger '{}'
+```
+
+依据用户初步确认的轴向：右臂 +Y向上、+X向前、+Z向右；左臂 +Y向下、+X向前、+Z向左。
+两臂各自在 **SDK机械臂基坐标系** 沿 -X 计算30 mm，Y/Z和旋转矩阵不变。
+这是假定轴向后的数值检查，不能代替实机方向验证。当前工具变换为空，计算点是法兰中心，
+不是已标定的工具TCP。服务不下发工具参数，也不需要工具动力学辨识结果来做纯运动学检查。
+
+算法先检查起始关节，再对0–30 mm的31个采样位置求逆解（以上一解为参考），
+检查SDK可达性/奇异/关节越限标志、桥接模型的关节范围、相邻解不超过3°，
+并用正解验证误差不超过0.1 mm和0.05°。默认规划裕量0.005 rad；若桥接配置不同，
+启动此节点时用 `--ros-args -p joint_limit_safety_margin_rad:=实际值` 显式保持一致，
+此独立节点不会自动读取运行中桥接的参数。
+
+`success=true` **只表示采样运动学检查通过，绝不表示已运动或允许执行**。
+返回文本包含 `NO_MOTION`、起点/终点XYZ（mm）、最终逆解关节角（deg）、最大位置/旋转残差、
+最大关节步长、相对规划限位的最小余量；失败会注明原因和路径点。
+无反馈、超时、名字重复/缺失、非有限位置或明显过旧/超前时间戳会拒绝。
+本功能尚无碰撞检查、连续轨迹安全证明、动态约束或电机执行路径。
+
 ## 9. 诊断与常见问题
 
 ### `MARVIN_SDK_ROOT is unset` 或SDK文件缺失
@@ -629,7 +743,7 @@ DDS多播。`ros2 topic info -v /io_teleop/joint_cmd` 应能显示艾欧发布�
 ### `SDK/controller control compatibility is not confirmed`
 
 当前配置中的 `sdk_control_compatibility_confirmed` 为 `false`。默认 `bridge.yaml` 会有意触发该拒绝；
-双臂受控联调使用 `bridge_both_test.yaml`。
+受控联调可使用 `bridge_both_test.yaml`，并核对 `enabled_arms`（当前为 `right`，不是 `both`）。
 
 ### 一直停在 `WAITING_FOR_ALIGNMENT`
 
@@ -646,10 +760,52 @@ ros2 run tianji_io_teleop_bridge alignment_dashboard
 查看节点错误日志和 `control_status.reason`。普通 `HOLD` 完成后需要再次显式启用；
 `SOFT_LIMIT_HOLD` 在目标回到释放裕量并稳定后可以自动恢复。
 
+如果显示 `COMMAND_WAIT`，表示输入被拒绝/超时、反馈暂不可用或SDK暂忙超过重试期限，
+节点不主动退出阻抗模式，等待反馈恢复和新指令重新对齐，
+不是普通HOLD的“保持0.5秒后下使能”。查看拒绝原因及对齐面板，无需重复调用enable_control。
+
 ### `OnClearSet failed`
 
 SDK前一个设置包可能仍在处理。节点会按 `sdk_packet_settle_sec` 分隔参数包与模式包，并对空闲请求进行有限重试。
 同时确认没有其他 Marvin SDK 客户端占用控制器连接。
+
+关节目标发送单独区分 `OnClearSet` 暂忙：跳过当前更新，下个控制周期重新检查安全条件，
+用最新有效目标重新限速；不阻塞、不积压旧目标、不覆盖SDK待发送包。
+未成功提交时不推进限速器的位置/速度状态，也不更新上次成功提交目标和时间。
+普通HOLD目标也使用同一期限，但不会继续跟随遥操作目标。
+
+`sdk_target_busy_timeout_sec: 0.1` 为 **100 ms**，从首次暂忙计时；重复暂忙不会重置期限。
+期限届满后停止本轮目标重试：遥操作进入COMMAND_WAIT，保持最后提交目标，不请求IDLE。
+重新对齐后才能开始下一轮下发；普通HOLD、回初始姿态仍按原故障停止流程处理。
+这是软件暂忙窗口，**不是“距上次控制器收到指令”的时限**；实际控制器指令间隔还包含
+此前控制周期、传输与调度延迟。用户已向天机确认：不发新目标时保持最后目标，不因超时退出。
+100 ms仍是桥接工程重试窗口，不是已认证的安全值；也不保证非实时系统在恰好100 ms时进入等待。
+参数须为正有限数，且不能超过指令或反馈超时；修改YAML后重启节点生效。
+状态发布频率独立配置（当前联调为300 Hz）；上述恢复机制不取消限位、反馈/指令超时检查。
+控制检查移到状态话题发布之前，避免本次状态发布阻塞使本次控制快照过期；仍使用单线程执行器，
+发布阻塞或系统调度仍可能延迟下一次回调，并非实时性保证。
+控制按本次处理**完成时间加一个周期**排期，
+不再按旧的固定相位赶进度。`control_rate_hz: 100.0` 表示控制频率上限，实际频率可能因
+SDK耗时和状态定时器粒度略低于100 Hz；错过周期不补发，恢复后仍限速，不追赶历史目标。
+参数包、模式包和其他SDK发送错误仍走原故障流程。`submitted` 仅表示SDK接受提交，不代表控制器确认收到。
+
+发生超时日志为 `joint target retry deadline exceeded`。其中 `elapsed_since_first_busy_ms`
+只表示自首次暂忙返回以来的经过时间，**不能证明SDK持续忙了这么久**；`busy_responses`
+才是本轮实际观察到的暂忙次数。故障日志保留当时的时序快照，不需要根据停机后的值反推。
+暂忙/恢复日志限流到每秒最多各一条；累计计数不受日志限流影响。
+
+下列时序字段也在 `/tianji_marvin_teleop_bridge/control_status` 中每秒发布（单位ms，未观察到为-1）：
+
+- `timer_gap_ms` / `max_timer_gap_ms`：反馈回调入口间隔及最大值。
+- `callback_age_ms`：当前回调已执行的时间，包含被系统调度暂停的时间。
+- `feedback_sdk_ms` / `max_feedback_sdk_ms`：反馈SDK调用的最近/最大耗时。
+- `target_sdk_ms` / `max_target_sdk_ms`：目标SDK调用的最近/最大耗时。
+- `target_attempt_gap_ms`、`last_target_attempt_age_ms`：最近两次目标尝试间隔及距最近尝试的时间。
+- `last_target_submit_age_ms`：距最近成功提交目标的时间，不是控制器确认时间；恢复日志中显示的是前一次提交年龄。
+- `target_busy_total`：累计暂忙返回次数。
+
+最大值和累计计数在SDK重连时清零。上述观测能帮助区分回调停顿与SDK调用耗时，
+但调用耗时也包含线程被暂停的时间，不能单凭它证明SDK内部卡顿。
 
 ### 末端六维力不为零或波动
 
@@ -669,6 +825,9 @@ colcon test-result --test-result-base build/tianji_io_teleop_bridge/test_results
 测试覆盖关节名称映射、position/velocity/effort逐索引对应、单位换算、输入拒绝、限位与恢复滞回、
 速度/加速度限制、控制状态门、扰动力消息映射，
 以及左右臂运动学的 `tau ↔ wrench` 回归验证。
+`test_target_send` 使用替身SDK（不链接机器人控制库）覆盖暂忙分类、缓冲区不覆盖、
+限速状态回滚、SDK暂忙到期转等待、快照过期/读失败/反馈帧停更时不发IDLE、
+双臂反馈恢复后重新对齐、手动停用和真实故障仍退出，以及只读模式不下发任何控制报文。
 
 ## 11. 项目结构
 
@@ -684,3 +843,68 @@ test/       GTest单元与回归测试
 ## License
 
 本项目代码使用 Apache-2.0 许可证。Marvin SDK、运动学库及其配置文件属于外部供应商依赖，遵循其各自许可。
+## 左右臂后退 10 cm 服务（正式配置）
+
+`/tianji_marvin_teleop_bridge/retreat_left_10cm` 和 `/tianji_marvin_teleop_bridge/retreat_right_10cm`（`std_srvs/srv/Trigger`）是**真实运动服务**，分别控制左臂、右臂。固定在对应 SDK 臂基座坐标系沿 −X 平移 **100 mm**，保持法兰 Y/Z 和旋转矩阵不变。两臂均按“+X 向前”，不是相机或工具自身坐标系。原 `/tianji_retreat_check/retreat_left`、`retreat_right` 仍是只计算30 mm、不运动的检查服务。
+
+只允许在 MONITOR、指定臂在 `enabled_arms` 范围内、反馈新鲜且该臂静止时调用。正式配置 `enabled_arms: both`、`subscribe_joint_commands: true` 可直接使用，不必切换为单臂配置。流程：仅准备被选中臂的阻抗 → 从实际位置规划一次 −X 100 mm 路径 → 平滑发送该臂目标 → 短暂保持 → 请求IDLE并回到MONITOR。规划检查 1001 个路径点的 IK、关节安全裕量和 FK 残差；规划失败则保持、不发送路径目标。**不需要先调用 enable_control=true，也不需要开启艾欧遥操作。**
+
+单次操作独占控制：遥操作、回初始姿态或另一臂后退正在执行/保持时，新的后退请求会被拒绝；后退期间收到的艾欧命令不参与执行。另一臂不会被下发阻抗参数、模式或关节目标，后退的手动退出和故障IDLE重试也仅针对被选中臂。状态话题的 `enabled_arms=both` 是配置允许范围，`control_arms=left/right` 是本次实际控制范围。
+
+执行改为连续下发：`retreat_duration_sec: 10.0` 表示 100 mm 名义用时 10 秒，平均约 10 mm/s。采用五次平滑曲线起步、减速停止；理想 10 秒轨迹的中段峰值约 18.75 mm/s。不再每 0.1 mm 停等 100 ms，也不再经过逐点清零速度的限速器。1001 个点按平滑进度规划，沿 SDK 基座 −X，Y/Z 和朝向保持不变；控制频率上限仍为 100 Hz。
+
+执行前检查全部采样关节目标的速度、加速度（含起止边界），分别不超过 0.20 rad/s、0.40 rad/s²，若配置的关节限速更低则取更低值。需要时自动延长发送周期，启动日志显示计算用时。SDK 忙或调度延迟不会跳过路径点、不会追赶补发，因此实际用时可能更长，通信抖动也会影响实机顺滑性。该检查约束的是规划采样轨迹，不是实测电机速度或加速度保证。
+
+继续保留关节限位、反馈有效性、SDK 持续忙保护，以及 `max_following_error_rad`（默认 0.25 rad）。发送超时取“30 秒”和“计算用时的 3 倍”中的较大值；超时停止推进、保持最后目标，不自动 IDLE。控制器明确故障、模式丢失等仍执行原有故障处理。左右臂共用 `retreat_duration_sec`，调整后重启节点，数值越大越慢。原右臂专用配置仍可兼容使用，但只允许右臂服务。
+
+正常下发结束后进入 `HOLD`，按 `hold_duration_sec`（默认0.5秒）短暂保持最后一个已发送目标，然后仅向本次后退的手臂请求 `IDLE`，请求发送成功后自动回到 `MONITOR`。不再需要额外调用 `enable_control=false`，可以继续请求另一臂或同一臂后退。若IDLE暂忙，保留单臂范围重试，成功后再回到MONITOR；失败期间不接受新运动。重试耗尽则保留故障，需要人工检查。
+
+日志仍明确说明“目标序列已发送，未验证实际到位”，随后显示 `left/right retreat finished: IDLE request sent; returned to MONITOR`（延迟重试成功时包含 `delayed`）。这里依据SDK发送成功返回MONITOR，没有增加IDLE反馈回读确认或精确到位判定。目标朝向保持不变，但实机运动精度取决于阻抗刚度、负载补偿和跟随能力。**正常结束会自动退出阻抗，可能卸力，请确保机械臂及负载可安全退出。**
+
+运动中因限位、反馈失效等异常进入的 `RETREAT_HOLD` 不适用上述正常收尾，仍保持最后目标、等待人工处理；控制器明确故障继续沿用故障退出逻辑。
+
+这是采样运动学检查，**没有碰撞检测**，也不能保证实机姿态绝对不变。首次测试须空载或正确配置负载、远离人和障碍物、准备实体急停；阻抗保持不等于机械锁止。关闭发送只保留最后下发目标，不保证瞬时测量位置不再变化。
+
+1. 安全停止原桥接节点，确保没有其他程序占用 Marvin 控制连接；保持待运动臂静止，确认后方及整个臂运动范围净空。
+2. 每次机器人断电重启后，先用厂商方式下发实际工具动力学参数。编辑 `config/bridge.yaml`，确认 SDK 兼容和双臂工具配置后才把 `sdk_control_compatibility_confirmed`、`tool_dynamics_confirmed` 改为 `true`。这两个标志只是人工确认，**不会下发工具参数**。保持 `enabled_arms: both`，允许保留 `subscribe_joint_commands: true`。现有 `bridge_both_test.yaml` 也已包含后退配置，可继续使用；不自动修改其中已有的联调参数。
+3. 编译并启动（以下工作空间路径按实际安装调整）：
+
+```bash
+cd /home/stw/tianji_ws
+source /opt/ros/humble/setup.bash
+colcon build --packages-select tianji_io_teleop_bridge
+source install/setup.bash
+ros2 launch tianji_io_teleop_bridge marvin_teleop_bridge.launch.py \
+  config_file:=/home/stw/tianji_ws/src/tianji_io_teleop_bridge/config/bridge.yaml \
+  allow_motion:=true
+```
+
+4. 新终端观察状态：
+
+```bash
+source /opt/ros/humble/setup.bash
+source /home/stw/tianji_ws/install/setup.bash
+ros2 topic echo /tianji_marvin_teleop_bridge/control_status
+```
+
+5. 确认安全后，在另一个已 source 的终端**只选择一条调用**：
+
+```bash
+ros2 service call /tianji_marvin_teleop_bridge/retreat_left_10cm std_srvs/srv/Trigger '{}'
+```
+
+或右臂：
+
+```bash
+ros2 service call /tianji_marvin_teleop_bridge/retreat_right_10cm std_srvs/srv/Trigger '{}'
+```
+
+`success=True` 仅表示受理，不表示路径已经规划或实机到位。看到 `left/right retreat target sequence sent: -X 100 mm; actual arrival not verified` 后，等待短暂保持和IDLE发送；确认状态回到 `MONITOR`，即可调用下一次后退，无需手动退出。若是异常保持或故障，需先检查原因再人工处理。每次调用均从新的当前位置再退 100 mm，不是回到固定绝对位置。
+
+主动退出阻抗（可能卸力，先确保机械臂和负载可安全退出）沿用：
+
+```bash
+ros2 service call /tianji_marvin_teleop_bridge/enable_control std_srvs/srv/SetBool '{data: false}'
+```
+
+紧急情况使用实体急停，不依赖 ROS 服务。程序退出后的机器人行为仍以厂商控制器为准。
