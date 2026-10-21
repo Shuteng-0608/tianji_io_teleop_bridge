@@ -56,9 +56,12 @@ tool_config_timeout_sec: 2.0
 source /opt/ros/humble/setup.bash
 source /home/stw/tianji_ws/install/setup.bash
 ros2 launch tianji_io_teleop_bridge marvin_teleop_bridge.launch.py \
+  right_ft_calibration_file:=/home/stw/ft_calibration_runs/本轮采集目录/result/calibration.yaml \
   config_file:=/home/stw/tianji_ws/src/tianji_io_teleop_bridge/config/bridge.yaml \
   connect_on_start:=false allow_motion:=false
 ```
+
+上述标定路径需替换为本轮结果；只预览工具配置时也可在桥接 YAML 中设置 `publish_right_ft_sensor: false`，无需该路径。
 
 另一个已 source 的终端可分别预览：
 

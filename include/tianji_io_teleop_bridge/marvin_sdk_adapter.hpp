@@ -3,6 +3,7 @@
 
 #include <array>
 #include <string>
+#include <stdexcept>
 
 #include "MarvinSDK.h"
 #include "tianji_io_teleop_bridge/joint_model.hpp"
@@ -11,6 +12,20 @@
 
 namespace tianji_io_teleop_bridge
 {
+
+enum class JointControlMode {kJointImpedance, kPosition};
+
+inline JointControlMode parse_joint_control_mode(const std::string & value)
+{
+  if (value == "joint_impedance") {return JointControlMode::kJointImpedance;}
+  if (value == "position") {return JointControlMode::kPosition;}
+  throw std::invalid_argument("teleop_control_mode must be 'joint_impedance' or 'position'");
+}
+
+inline const char * joint_control_mode_name(JointControlMode mode)
+{
+  return mode == JointControlMode::kPosition ? "position" : "joint_impedance";
+}
 
 enum class EnabledArms
 {
@@ -46,11 +61,15 @@ public:
   bool connect(const std::array<unsigned char, 4> & ip);
   bool disconnect();
   bool read_feedback(DCSS & feedback);
+  // Blocking telemetry setup; call only during connection initialization.
+  bool select_right_ft_sensor();
 
   bool configure_joint_impedance_parameters(
     EnabledArms arms,
     const JointImpedanceSettings & settings);
   bool enter_joint_impedance_mode(EnabledArms arms);
+  bool configure_position_parameters(EnabledArms arms, int velocity_ratio, int acceleration_ratio);
+  bool enter_position_mode(EnabledArms arms);
   TargetSendResult send_joint_targets(EnabledArms arms, const JointArray & positions_deg);
   bool request_idle(EnabledArms arms);
   TargetSendResult configure_tool(std::size_t arm, const ToolConfiguration & config);

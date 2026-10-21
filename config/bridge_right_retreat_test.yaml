@@ -4,12 +4,23 @@
 tianji_marvin_teleop_bridge:
   ros__parameters:
     robot_ip: "192.168.1.190"
+    # Right-arm six-axis sensor; recording compatibility uses JointState name + effort.
+    publish_right_ft_sensor: true
+    right_ft_sensor_topic: "/io_teleop/right/ft_sensor"
+    # REQUIRED: set this startup calibration.yaml path here or via launch right_ft_calibration_file:=...
+    right_ft_calibration_file: ""
+    right_ft_tare_directory: "/home/stw/ft_calibration_runs/teleop_tares"
+    right_ft_tare_window_sec: 5.0
+    # Measurement axes confirmed by manufacturer; no transform of the sensor origin.
+    right_ft_sensor_frame_id: "right_ft_measurement"
     # Commissioning: services may upload tools when motion/feedback gates pass; no startup upload.
     # Empty path explicitly selects the bundled config/tools_cfg.json snapshot.
     tools_config_file: "/home/stw/TJ_FX_ROBOT_CONTRL_SDK/MarvinPlatform_EN/tools_cfg.json"
     tool_config_dry_run: false
     tool_config_timeout_sec: 2.0
     allow_motion: false
+    # Retreat remains joint impedance regardless of this teleoperation-only selection.
+    teleop_control_mode: "joint_impedance"  # joint_impedance or position
     enabled_arms: "right"
     subscribe_joint_commands: false
     sdk_control_compatibility_confirmed: true
@@ -24,3 +35,5 @@ tianji_marvin_teleop_bridge:
     right_joint_damping: [0.35, 0.35, 0.35, 0.30, 0.25, 0.25, 0.25]
     velocity_ratio: 50
     acceleration_ratio: 50
+    initial_pose_velocity_ratio: 10
+    initial_pose_acceleration_ratio: 10

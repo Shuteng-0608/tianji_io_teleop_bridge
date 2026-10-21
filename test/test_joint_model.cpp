@@ -61,6 +61,24 @@ TEST(JointModel, ReordersCommandByJointName)
   EXPECT_DOUBLE_EQ(result.positions_rad[9], 0.5);
 }
 
+TEST(JointModel, BackupExtensionAcceptsUrdfBoundaryAndRejectsBeyondOuterGuard)
+{
+  auto positions = make_valid_message().position;
+  bridge::JointArray target{};
+  std::copy(positions.begin(), positions.end(), target.begin());
+  constexpr double extension = 0.0101;
+  target[8] = bridge::lower_limits_rad()[8] - extension;
+  EXPECT_TRUE(bridge::inspect_joint_limit_margin(target, 0.0, extension).arm_safe[1]);
+  EXPECT_FALSE(bridge::within_safe_joint_limits(target, 0.005));
+  target[8] -= 0.001;
+  EXPECT_FALSE(bridge::inspect_joint_limit_margin(target, 0.0, extension).arm_safe[1]);
+  EXPECT_FALSE(bridge::inspect_joint_limit_margin(target, 0.0, -0.01).valid);
+  EXPECT_FALSE(bridge::inspect_joint_limit_margin(
+    target, 0.0, std::numeric_limits<double>::infinity()).valid);
+  target[8] = std::numeric_limits<double>::quiet_NaN();
+  EXPECT_FALSE(bridge::inspect_joint_limit_margin(target, 0.0, extension).arm_safe[1]);
+}
+
 TEST(JointModel, RejectsMissingJoint)
 {
   auto message = make_valid_message();
@@ -210,28 +228,4 @@ TEST(JointModel, SoftLimitMarginsSupportRecoveryHysteresis)
   EXPECT_TRUE(bridge::within_safe_joint_limits(positions, 0.03));
 
   EXPECT_FALSE(bridge::inspect_joint_limit_margin(positions, -0.01).valid);
-}
-
-TEST(JointModel, SlewLimiterBoundsAccelerationAndVelocity)
-{
-  bridge::JointArray start{};
-  bridge::JointArray desired{};
-  bridge::JointArray max_velocity{};
-  bridge::JointArray max_acceleration{};
-  desired.fill(1.0);
-  max_velocity.fill(0.25);
-  max_acceleration.fill(0.50);
-
-  bridge::JointSlewLimiter limiter;
-  limiter.reset(start);
-  const auto first = limiter.update(desired, max_velocity, max_acceleration, 0.01);
-  EXPECT_NEAR(first[0], 0.00005, 1.0e-12);
-
-  auto output = first;
-  for (int iteration = 0; iteration < 100; ++iteration) {
-    const auto previous = output;
-    output = limiter.update(desired, max_velocity, max_acceleration, 0.01);
-    EXPECT_LE(output[0] - previous[0], 0.0025 + 1.0e-12);
-    EXPECT_LE(output[0], desired[0]);
-  }
 }

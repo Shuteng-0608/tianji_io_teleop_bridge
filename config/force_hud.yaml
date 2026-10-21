@@ -1,6 +1,7 @@
+# Legacy parameters: used only with launch input_source:=joint_estimate.
 tianji_force_estimator:
   ros__parameters:
-    state_topic: /io_teleop/joint_states
+    state_topic: /tianji_marvin_teleop_bridge/estimated_joint_disturbance
     estimate_topic: /tianji_force_hud/estimates
     kinematics_config_file: ""
     estimate_rate_hz: 100.0
@@ -19,14 +20,20 @@ tianji_force_estimator:
 
 tianji_force_hud:
   ros__parameters:
+    input_source: right_ft_sensor
+    right_ft_topic: /io_teleop/right/ft_sensor
+    right_ft_frame: right_ft_measurement
+    # Use bridge right/zero_ft_sensor; HUD never applies a second tare to FT data.
+    enable_display_force_zero: false
     estimate_topic: /tianji_force_hud/estimates
     image_topic: /tianji_force_hud/image/compressed
-    image_rate_hz: 30.0
+    image_rate_hz: 100.0
     image_width: 1280
     image_height: 720
     jpeg_quality: 80
     image_qos_reliability: best_effort
     display_mode: ring  # ring (operator view) | bars (six-axis debugging)
+    display_arms: right  # Only the right arm has an end FT sensor.
     ring_semantics: force  # force | contact_side (use insertion preview config)
     lateral_display_deadzone: 0.0
     axial_display_deadzone: 0.0
@@ -50,7 +57,7 @@ tianji_force_hud:
     left_axial_axis: [0.0, 0.0, 1.0]
     right_direction_mapping_confirmed: false
     right_direction_preview: false
-    right_direction_frame: ""
+    right_direction_frame: right_ft_measurement
     right_screen_right_axis: [1.0, 0.0, 0.0]
     right_screen_up_axis: [0.0, 1.0, 0.0]
     right_axial_axis: [0.0, 0.0, 1.0]

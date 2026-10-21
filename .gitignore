@@ -70,3 +70,5 @@ TJ_FX_ROBOT_CONTRL_SDK/
 config/local/
 config/*_local.yaml
 config/*_private.yaml
+# Per-startup generated force calibration; retain on this machine, not in Git.
+config/right_ft_calibration_current.yaml

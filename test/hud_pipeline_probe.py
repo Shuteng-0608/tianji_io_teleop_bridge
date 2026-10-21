@@ -16,7 +16,7 @@ import time
 import uuid
 
 
-def run(duration=10.0, output_dir=None, display_mode="ring", insertion=False):
+def run(duration=10.0, output_dir=None, display_mode="ring", insertion=False, display_arms="both"):
     # Set before importing/initializing ROS; localhost + unique topics isolate the probe.
     os.environ["ROS_LOCALHOST_ONLY"] = "1"
     os.environ["ROS_DOMAIN_ID"] = str(100 + os.getpid() % 100)
@@ -36,7 +36,9 @@ def run(duration=10.0, output_dir=None, display_mode="ring", insertion=False):
     rclpy.init()
     node = rclpy.create_node("hud_probe_" + uuid.uuid4().hex[:8])
     qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
-    pub = node.create_publisher(JointState, prefix + "/input", 1)
+    pub = node.create_publisher(JointState, prefix + "/disturbance", 1)
+    # A simultaneous measured-torque stream must never feed the force HUD.
+    measured_pub = node.create_publisher(JointState, prefix + "/joint_states", 1)
     processes, logs = [], []
     latest = {"estimate": None, "display": None}
     arrivals = {key: [] for key in ("source", "estimate", "image")}
@@ -69,6 +71,12 @@ def run(duration=10.0, output_dir=None, display_mode="ring", insertion=False):
         message.name.reverse()
         message.position.reverse()
         message.effort.reverse()
+        measured = JointState()
+        measured.header = message.header
+        measured.name = list(message.name)
+        measured.position = list(message.position)
+        measured.effort = [9.0] * 14  # Deliberately nonzero, unlike the valid disturbance input.
+        measured_pub.publish(measured)
         pub.publish(message)
         if collecting:
             arrivals["source"].append(time.monotonic())
@@ -95,7 +103,7 @@ def run(duration=10.0, output_dir=None, display_mode="ring", insertion=False):
             assert decoded is not None and decoded.shape == (720, 1280, 3)
             image_snapshot = decoded
 
-    timer = node.create_timer(1 / 500, publish)
+    timer = node.create_timer(1 / 300, publish)
     subscriptions = [
         node.create_subscription(DiagnosticArray, prefix + "/estimates", estimate, qos),
         node.create_subscription(CompressedImage, prefix + "/image", image, qos),
@@ -117,6 +125,8 @@ def run(duration=10.0, output_dir=None, display_mode="ring", insertion=False):
                 assert fields["convention_confirmed"] == "false"
                 if key == "display":
                     assert fields["display_mode"] == display_mode
+                    assert fields["display_arms"] == display_arms
+                    assert fields["panel_visible"] == str(display_arms in ("both", item.name)).lower()
                     assert fields["direction_active"] == ("true" if insertion else "false")
                     if insertion:
                         assert fields["ring_semantics"] == "contact_side"
@@ -156,15 +166,22 @@ def run(duration=10.0, output_dir=None, display_mode="ring", insertion=False):
 
     try:
         estimator_args = [str(executable_dir / "force_hud_estimator_node"), "--ros-args",
-                          "-r", "__node:=hud_probe_estimator", "-p", "state_topic:=" + prefix + "/input",
+                          "-r", "__node:=hud_probe_estimator", "-p", "state_topic:=" + prefix + "/disturbance",
                           "-p", "estimate_topic:=" + prefix + "/estimates"]
         renderer_args = [str(executable_dir / "force_hud_node"), "--ros-args",
-                         "-r", "__node:=hud_probe_renderer", "-p", "estimate_topic:=" + prefix + "/estimates",
+                         "-r", "__node:=hud_probe_renderer", "-p", "input_source:=joint_estimate", "-p", "estimate_topic:=" + prefix + "/estimates",
                          "-p", "image_topic:=" + prefix + "/image",
+                         "-p", "image_rate_hz:=100.0",
                          "-p", "display_mode:=" + display_mode,
+                         "-p", "display_arms:=" + display_arms,
                          "-r", "~/display_values:=" + prefix + "/display_values"]
+        for side in ("left", "right", "both"):
+            for service in ("zero_force", "clear_force_zero"):
+                renderer_args += ["-r", "~/" + side + "/" + service + ":=" +
+                                  prefix + "/" + side + "/" + service]
         if insertion:
-            renderer_args += ["-p", "ring_semantics:=contact_side",
+            renderer_args += ["-p", "enable_display_force_zero:=true",
+                              "-p", "ring_semantics:=contact_side",
                               "-p", "lateral_display_deadzone:=0.5",
                               "-p", "axial_display_deadzone:=0.5"]
             for side in ("left", "right"):
@@ -172,11 +189,6 @@ def run(duration=10.0, output_dir=None, display_mode="ring", insertion=False):
                 estimator_args += ["-p", side + "_wrench_frame:=" + frame]
                 renderer_args += ["-p", side + "_direction_frame:=" + frame,
                                   "-p", side + "_direction_preview:=true"]
-                for service in ("zero_force", "clear_force_zero"):
-                    renderer_args += ["-r", "~/" + side + "/" + service + ":=" +
-                                      prefix + "/" + side + "/" + service]
-            for service in ("zero_force", "clear_force_zero"):
-                renderer_args += ["-r", "~/both/" + service + ":=" + prefix + "/both/" + service]
         for name, command in (("estimator", estimator_args), ("renderer", renderer_args)):
             log = (output / (name + ".log")).open("w")
             logs.append(log)
@@ -197,6 +209,10 @@ def run(duration=10.0, output_dir=None, display_mode="ring", insertion=False):
         assert_valid()
         assert image_snapshot is not None
         cv2.imwrite(str(output / "valid.jpg"), image_snapshot)
+        if not insertion:
+            response = call_zero("both")
+            assert not response.success and "both/zero_joint_torque" in response.message
+            assert call_zero("both", clear=True).success
         if insertion:
             assert call_zero().success
             spin(0.1)
@@ -257,17 +273,20 @@ def run(duration=10.0, output_dir=None, display_mode="ring", insertion=False):
         results["duration_sec"] = duration
         results["display_mode"] = display_mode
         results["insertion"] = insertion
-        results["checks"] = ["reversed joint mapping", "zero-wrench conversion", "JPEG decode",
+        results["checks"] = ["separate measured torque ignored", "reversed joint mapping", "zero-wrench conversion", "JPEG decode",
                              "missing effort invalidation", "input timeout", "recovery",
                              "singular pose", "future/old timestamps", "duplicate joint names",
                              "estimator death timeout", "unverified convention preserved"]
+        if not insertion:
+            results["checks"].append("display-only tare disabled by default; redirects to joint tare")
         if insertion:
             results["checks"] += ["contact-side preview", "manual per-arm display zero",
                                   "clear display zero", "stale zero rejected",
                                   "both-arm zero and clear services", "stale both zero rejected"]
         (output / "results.json").write_text(json.dumps(results, indent=2) + "\n")
         print(json.dumps({"artifacts": str(output), **results}, indent=2), flush=True)
-        assert 28.5 <= results["image"]["hz"] <= 31.5, results
+        assert 250 <= results["source"]["hz"] <= 340, results
+        assert 95 <= results["image"]["hz"] <= 105, results
         assert 95 <= results["estimate"]["hz"] <= 105, results
         return results
     finally:
@@ -288,9 +307,10 @@ if __name__ == "__main__":
     parser.add_argument("--output-dir")
     parser.add_argument("--display-mode", choices=("ring", "bars"), default="ring")
     parser.add_argument("--insertion", action="store_true")
+    parser.add_argument("--display-arms", choices=("both", "left", "right"), default="both")
     args = parser.parse_args()
     if not math.isfinite(args.duration) or args.duration < 2:
         parser.error("duration must be >= 2 seconds")
     if args.insertion and args.display_mode != "ring":
         parser.error("insertion requires ring display")
-    run(args.duration, args.output_dir, args.display_mode, args.insertion)
+    run(args.duration, args.output_dir, args.display_mode, args.insertion, args.display_arms)

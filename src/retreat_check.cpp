@@ -4,7 +4,6 @@
 #include <cmath>
 #include <iomanip>
 #include <sstream>
-#include <stdexcept>
 #include "FxRobot.h"
 #include "tianji_io_teleop_bridge/joint_model.hpp"
 
@@ -102,31 +101,6 @@ RetreatCheck check_retreat(std::size_t arm, const ArmAngles & start_deg, double 
   out.success = true;
   out.reason = "sampled kinematic check passed; not collision checked; NO MOTION";
   return out;
-}
-
-double retreat_sample_period(const std::vector<ArmAngles> & path_deg, double duration_sec,
-  const ArmAngles & velocity_limits, const ArmAngles & acceleration_limits)
-{
-  if (path_deg.size() < 2 || !std::isfinite(duration_sec) || duration_sec <= 0) {
-    throw std::invalid_argument("invalid retreat duration or path");
-  }
-  double period = duration_sec / (path_deg.size() - 1);
-  for (std::size_t j = 0; j < 7; ++j) {
-    if (!std::isfinite(velocity_limits[j]) || velocity_limits[j] <= 0 ||
-      !std::isfinite(acceleration_limits[j]) || acceleration_limits[j] <= 0)
-    {throw std::invalid_argument("invalid retreat joint rate limits");}
-    double previous_step = 0.0;
-    for (std::size_t i = 0; i < path_deg.size(); ++i) {
-      if (!std::isfinite(path_deg[i][j])) {throw std::invalid_argument("nonfinite retreat path");}
-      if (i == 0) {continue;}
-      const double step = degrees_to_radians(path_deg[i][j] - path_deg[i - 1][j]);
-      period = std::max(period, std::abs(step) / velocity_limits[j]);
-      period = std::max(period, std::sqrt(std::abs(step - previous_step) / acceleration_limits[j]));
-      previous_step = step;
-    }
-    period = std::max(period, std::sqrt(std::abs(previous_step) / acceleration_limits[j]));
-  }
-  return period;
 }
 
 std::string retreat_report(std::size_t arm, const RetreatCheck & out)

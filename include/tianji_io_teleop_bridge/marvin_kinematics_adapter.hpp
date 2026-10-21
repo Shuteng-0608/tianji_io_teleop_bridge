@@ -15,6 +15,8 @@ class MarvinKinematicsAdapter
 {
 public:
   bool initialize(const std::string & config_file);
+  bool flange_rotation(std::size_t arm_index, const std::array<double, kArmDof> & positions_deg,
+    std::array<std::array<double, 3>, 3> & rotation);
   bool joint_disturbance_to_wrench(
     std::size_t arm_index,
     const std::array<double, kArmDof> & positions_deg,

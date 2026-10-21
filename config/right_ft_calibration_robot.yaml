@@ -1,0 +1,58 @@
+# Reusable configuration for the current right-arm installation; no saved mass, COM or zero bias.
+# Loaded directly by auto. Operator performs bare-sensor zero before installing the tool.
+schema_version: 1
+sdk_root: /home/stw/TJ_FX_ROBOT_CONTRL_SDK
+model_file: /home/stw/TJ_FX_ROBOT_CONTRL_SDK/CommonConfig/ccs_m6_40.MvKDCfg
+robot_ip: 192.168.1.190
+# Successful auto calibration replaces this local result beside the bridge configs.
+current_calibration_file: /home/stw/tianji_ws/src/tianji_io_teleop_bridge/config/right_ft_calibration_current.yaml
+automatic:
+  velocity_percent: 10
+  acceleration_percent: 10
+  preflight_s: 1.0
+  mode_timeout_s: 5.0
+  command_timeout_s: 1.0
+  move_timeout_s: 60.0
+  stop_timeout_s: 3.0
+  sensor_stale_s: 2.0
+sampling:
+  settle_s: 1.0
+  duration_s: 2.0
+  timeout_s: 30.0
+  poll_hz: 400.0
+  fresh_timeout_s: 0.2
+  min_samples: 200
+  target_tolerance_deg: 1.0
+  base_tolerance_deg: 0.5
+  max_velocity_deg_s: 0.2
+  max_position_span_deg: 0.15
+  max_force_std_N: 0.1
+  max_torque_std_Nm: 0.005
+sensor:
+  axes_confirmed: true
+  frame_id: right_ft_measurement
+  R_flange_sensor:
+  - - 1.0
+    - 0.0
+    - 0.0
+  - - 0.0
+    - 1.0
+    - 0.0
+  - - 0.0
+    - 0.0
+    - 1.0
+  force_sign: 1
+  torque_sign: 1
+  axes_confirmed_by_manufacturer_via_operator: true
+  coordinate_basis: manufacturer-confirmed SDK sensor axes aligned with flange axes
+  installation_bias_reference_applied: false
+gravity:
+  base_direction_confirmed: true
+  base_m_s2:
+  - 0.0
+  - -9.81
+  - 0.0
+fitting:
+  max_condition: 30.0
+  max_validation_force_rms_N: 0.2
+  max_validation_torque_rms_Nm: 0.01

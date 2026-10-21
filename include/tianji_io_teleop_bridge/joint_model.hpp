@@ -154,7 +154,9 @@ inline CommandValidationResult validate_joint_command(
       position > upper_limits_rad()[index] + limit_tolerance_rad)
     {
       std::ostringstream stream;
-      stream << "joint limit violation for " << joint_names()[index] << ": " << position;
+      stream << "joint limit violation for " << joint_names()[index] << ": " << position <<
+        " allowed=[" << lower_limits_rad()[index] - limit_tolerance_rad << "," <<
+        upper_limits_rad()[index] + limit_tolerance_rad << "]";
       result.reason = stream.str();
       return result;
     }
@@ -219,10 +221,12 @@ inline double max_abs_delta(const JointArray & first, const JointArray & second)
 }
 
 inline JointLimitMarginResult inspect_joint_limit_margin(
-  const JointArray & positions, double margin_rad)
+  const JointArray & positions, double margin_rad, double extension_rad = 0.0)
 {
   JointLimitMarginResult result;
-  if (!std::isfinite(margin_rad) || margin_rad < 0.0) {
+  if (!std::isfinite(margin_rad) || margin_rad < 0.0 ||
+    !std::isfinite(extension_rad) || extension_rad < 0.0)
+  {
     return result;
   }
   result.valid = true;
@@ -230,8 +234,9 @@ inline JointLimitMarginResult inspect_joint_limit_margin(
   result.joint_safe.fill(true);
   for (std::size_t index = 0; index < kJointCount; ++index) {
     if (
-      positions[index] < lower_limits_rad()[index] + margin_rad ||
-      positions[index] > upper_limits_rad()[index] - margin_rad)
+      !std::isfinite(positions[index]) ||
+      positions[index] < lower_limits_rad()[index] - extension_rad + margin_rad ||
+      positions[index] > upper_limits_rad()[index] + extension_rad - margin_rad)
     {
       result.arm_safe[index / kArmDof] = false;
       result.joint_safe[index] = false;
@@ -248,61 +253,6 @@ inline bool within_safe_joint_limits(const JointArray & positions, double margin
   const auto result = inspect_joint_limit_margin(positions, margin_rad);
   return result.valid && result.arm_safe[0] && result.arm_safe[1];
 }
-
-class JointSlewLimiter
-{
-public:
-  void reset(const JointArray & positions)
-  {
-    positions_ = positions;
-    velocities_.fill(0.0);
-    initialized_ = true;
-  }
-
-  JointArray update(
-    const JointArray & desired,
-    const JointArray & max_velocity_rad_s,
-    const JointArray & max_acceleration_rad_s2,
-    double dt_sec)
-  {
-    if (!initialized_) {
-      reset(desired);
-      return positions_;
-    }
-    if (!std::isfinite(dt_sec) || dt_sec <= 0.0) {
-      return positions_;
-    }
-
-    for (std::size_t index = 0; index < kJointCount; ++index) {
-      const double max_velocity = std::max(0.0, max_velocity_rad_s[index]);
-      const double max_acceleration = std::max(0.0, max_acceleration_rad_s2[index]);
-      const double error = desired[index] - positions_[index];
-      const double requested_velocity = std::clamp(
-        error / dt_sec, -max_velocity, max_velocity);
-      const double velocity_delta = std::clamp(
-        requested_velocity - velocities_[index],
-        -max_acceleration * dt_sec,
-        max_acceleration * dt_sec);
-      const double next_velocity = std::clamp(
-        velocities_[index] + velocity_delta, -max_velocity, max_velocity);
-      const double step = next_velocity * dt_sec;
-
-      if (std::abs(step) >= std::abs(error)) {
-        positions_[index] = desired[index];
-        velocities_[index] = 0.0;
-      } else {
-        positions_[index] += step;
-        velocities_[index] = next_velocity;
-      }
-    }
-    return positions_;
-  }
-
-private:
-  bool initialized_{false};
-  JointArray positions_{};
-  JointArray velocities_{};
-};
 
 }  // namespace tianji_io_teleop_bridge
 

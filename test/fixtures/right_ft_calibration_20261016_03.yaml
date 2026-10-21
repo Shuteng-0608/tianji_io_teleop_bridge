@@ -1,0 +1,248 @@
+# Historical test fixture only; never installed or selected for live acquisition.
+schema_version: 1
+kind: real_telemetry
+created_utc: '2026-10-16T12:23:23.736690+00:00'
+validation_passed: true
+parameters:
+  mass_kg: 0.30681170389169404
+  com_sensor_m:
+  - -4.57926334648345e-05
+  - 0.02315789952370997
+  - 0.04312979085992821
+  force_bias_N:
+  - 0.4226312057938369
+  - 0.11423782402598909
+  - 1.180125582706692
+  torque_bias_Nm:
+  - -0.0005849172175496492
+  - 0.02454622108848717
+  - 0.024832731016376147
+  coverage:
+    force_rank: 4
+    force_condition: 2.4871707088732635
+    torque_rank: 6
+    torque_condition: 6.689956912023832
+    max_gravity_angle_deg: 149.9998397798422
+sensor:
+  axes_confirmed: true
+  frame_id: right_ft_measurement
+  R_flange_sensor:
+  - - 1.0
+    - 0.0
+    - 0.0
+  - - 0.0
+    - 1.0
+    - 0.0
+  - - 0.0
+    - 0.0
+    - 1.0
+  force_sign: 1
+  torque_sign: 1
+  coordinate_basis: manufacturer_axis_alignment_confirmation_relayed_by_operator
+  axes_physically_verified: false
+  assumption_selected_at: '2026-10-16T17:04:52.667882+08:00'
+  assumption_note: SDK measurement axes aligned with SDK model flange axes, accepted
+    from manufacturer confirmation relayed by operator. Force and torque signs remain
+    +1 as selected by operator. Measurement origin remains the force sensor origin;
+    axis alignment does not imply the origins coincide.
+  previous_R_flange_sensor:
+  - - 0.0
+    - 0.0
+    - 1.0
+  - - 0.0
+    - -1.0
+    - 0.0
+  - - 1.0
+    - 0.0
+    - 0.0
+  installation_bias_reference_applied: false
+  axes_confirmed_by_manufacturer_via_operator: true
+  manufacturer_confirmation_recorded_at: '2026-10-16T17:16:37.844104+08:00'
+  operator_confirmation_text: 我已经和厂家确认过，是一致的
+  physical_verification_note: No independent directional loading experiment was performed
+    by this program; axis alignment is accepted from the operator-relayed manufacturer
+    confirmation.
+  force_sign_basis: operator_selected_plus_one
+  torque_sign_basis: operator_selected_plus_one
+  hardware_zero_reference: /home/stw/ft_calibration_runs/no_tool_zero_20261016_200834/summary.json
+  hardware_zero_reference_sha256: 1da65b26ac634a62ac3fe97cc024af66ed44222cc3d46d3e8c06230024545841
+  installation_bias_reference: /home/stw/ft_calibration_runs/tool_installed_check_20261016_201252/installation_bias_reference.json
+  installation_bias_reference_sha256: 3d7b0b4e614aa8cad48301fe5bf79261d0357f2dd356d6db26bf4f25699edc30
+gravity_base_m_s2:
+- 0.0
+- -9.81
+- 0.0
+model_sha256: ce20b1a80974c3ed58cdac4973152625096c8ad93a779e5fd4108c26ce19bd52
+session_sha256: baccafff4855ba0bf25befb2151a87dcbf6bf4dae1e1864ae6eae8792a4e9630
+zero_note: 2026-10-16 20:08:37 无工具清零验证通过，随后安装当前工具，未再次清零
+thresholds:
+  max_condition: 30.0
+  max_validation_force_rms_N: 0.2
+  max_validation_torque_rms_Nm: 0.01
+residuals:
+  calibration:
+    pose_ids:
+    - C01
+    - C02
+    - C03
+    - C04
+    - C05
+    - C06
+    - C07
+    - C08
+    - C09
+    - C10
+    - C11
+    - C12
+    per_axis_rms_N_Nm:
+    - 0.03562514238188922
+    - 0.023963090494974502
+    - 0.02727058261028732
+    - 0.0003979498622742309
+    - 0.0013682323131450275
+    - 0.0005055118827145675
+    per_axis_max_abs_N_Nm:
+    - 0.06992372461927998
+    - 0.04137574342018535
+    - 0.04645387006812651
+    - 0.0008191736541781867
+    - 0.0021313413004570222
+    - 0.0008332481568621916
+    force_vector_rms_N: 0.05086320036828907
+    torque_vector_rms_Nm: 0.001511941142764459
+    per_pose_residual_N_Nm:
+    - - -0.049396023172581294
+      - 0.0056088201252404435
+      - -0.04645387006812651
+      - -0.0008191736541781867
+      - -0.0017943917755529719
+      - 0.00048457579720988936
+    - - -0.04799645964848365
+      - 0.014167189328803342
+      - -0.031297141125744846
+      - -0.0006253322840692327
+      - -0.0007667876367005513
+      - 0.00020042165145494478
+    - - -0.03403216137827225
+      - -0.004177307093303995
+      - -0.016842696264300017
+      - -1.0618403688433808e-05
+      - -0.0005312912121441977
+      - 0.00016557681101770153
+    - - -0.012339279168188777
+      - -0.041162147922641834
+      - -0.018007195496264394
+      - 0.0004295915646933546
+      - -0.001302691136981636
+      - 0.0005197073202731217
+    - - 0.024420592997170754
+      - -0.03013305581053438
+      - -0.016482696457919666
+      - -0.00011948906616837673
+      - -0.00142196336098031
+      - 0.00041868381516117076
+    - - -0.0064285974128706624
+      - 0.0011883062386135457
+      - 0.02020466216588046
+      - 5.500200005245648e-05
+      - 0.000441828966429688
+      - -0.00018435050737006936
+    - - -0.022951665983591663
+      - -0.003514043932602018
+      - 0.01904112737726857
+      - 0.0002732563250188308
+      - 0.00034229063764991755
+      - -2.021874831615797e-05
+    - - -0.010568833844977865
+      - -0.028343975481095685
+      - -0.021745266440417632
+      - 0.0002484658848064536
+      - -0.001576471340491846
+      - 0.0008301252703669867
+    - - 0.027000252215760023
+      - -0.00693819602754675
+      - 0.008793150979844011
+      - 0.00042214228029159584
+      - 0.0010200636121430462
+      - -0.00039635825746987124
+    - - 0.018216727240167374
+      - 0.03349060493348288
+      - 0.03721094276349682
+      - 0.00042531526663891484
+      - 0.0021313413004570222
+      - -0.0007370277241502098
+    - - 0.044151723536584975
+      - 0.04137574342018535
+      - 0.03784930718741508
+      - 8.60879729766284e-05
+      - 0.002113576328904243
+      - -0.0008332481568621916
+    - - 0.06992372461927998
+      - 0.01843806222140354
+      - 0.027729675378869167
+      - -0.00036524788637490313
+      - 0.0013444956172673113
+      - -0.0004478872713150617
+  validation:
+    pose_ids:
+    - V01
+    - V02
+    - V03
+    - V04
+    - V05
+    - V06
+    per_axis_rms_N_Nm:
+    - 0.027791725854136667
+    - 0.007863879929445212
+    - 0.0441680717752255
+    - 0.0004152624406190636
+    - 0.0007853206241945867
+    - 0.000707592050137751
+    per_axis_max_abs_N_Nm:
+    - 0.05679593066490163
+    - 0.01553389051817966
+    - 0.05035499682636191
+    - 0.0007246678099946391
+    - 0.001294846740571249
+    - 0.0011867546488343005
+    force_vector_rms_N: 0.052773470587385955
+    torque_vector_rms_Nm: 0.0011357191055857173
+    per_pose_residual_N_Nm:
+    - - 0.05679593066490163
+      - 0.006325446267043233
+      - 0.04115529345436686
+      - -0.00034165407787722923
+      - 0.001189004958790426
+      - -0.00022545345172915107
+    - - 0.012892873941851568
+      - 0.002159554614264536
+      - 0.04301982545567351
+      - 0.00047553505460275203
+      - 0.001294846740571249
+      - -4.844959172285376e-05
+    - - -0.00496929454139744
+      - 0.01553389051817966
+      - 0.040526511447136926
+      - 0.00011099065812274211
+      - 0.0004183462986211105
+      - 0.0005363145874701693
+    - - 0.027685851612768653
+      - 0.0039251981172969685
+      - 0.05035499682636191
+      - -0.00033650416938590944
+      - 0.0006374415118345945
+      - 0.0005124091085072814
+    - - 0.012572496575517733
+      - -0.008203143844013994
+      - 0.04447596083915295
+      - -0.00020272852142749764
+      - -2.3952352061505644e-05
+      - 0.0009961723781202851
+    - - -0.01711748460584467
+      - 0.0015388940323286526
+      - 0.044769553230666226
+      - -0.0007246678099946391
+      - -0.00016760370332067828
+      - 0.0011867546488343005
+equations: w_canonical = signs * (raw / 10000); Fg=m*g_s; tau_g=com_s x Fg; w_external=w_canonical-[Fg,tau_g]-bias
+com_reference: sensor measurement origin, expressed in sensor frame

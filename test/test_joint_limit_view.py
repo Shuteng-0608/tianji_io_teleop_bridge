@@ -25,6 +25,29 @@ def test_mapping_is_canonical_not_message_order():
         assert row.ranges_valid()
 
 
+def test_backup_ranges_use_outer_guard_and_allow_urdf_endpoints():
+    status = make_status('Joint2_R', -1.676)
+    values = {entry.key: entry.value for entry in status.values}
+    values.update(joint_limit_policy='backup', hard_lower_rad='-1.676', hard_upper_rad='0',
+                  guard_lower_rad='-1.6861', guard_upper_rad='0.0101',
+                  soft_lower_rad='-1.6861', soft_upper_rad='0.0101',
+                  release_lower_rad='-1.6861', release_upper_rad='0.0101',
+                  safe_lower_rad='-1.6861', safe_upper_rad='0.0101', command_rad='-1.676')
+    row = JointView.from_values('Joint2_R', values)
+    assert row.ranges_valid()
+    assert row.display_bounds() == row.guard
+    assert row.advice(True, True, 'COMMAND_WAIT')[1] == 'ok'
+    from joint_limit_dashboard import LimitWindow
+    window = LimitWindow.__new__(LimitWindow)
+    window.canvas = RecordingCanvas()
+    window.draw_row(row, 16, 12, 550, True, True, True)
+    texts = [options['text'] for name, _, options in window.canvas.items if name == 'create_text']
+    assert f'{row.guard[0]:+.2f}°' in texts
+    assert f'{row.guard[1]:+.2f}°' in texts
+    row.guard = (math.nan, math.nan)
+    assert not row.ranges_valid()
+
+
 def test_duplicates_missing_or_unknown_never_reuse_other_arm():
     _, rows = decode([make_status('Joint1_R', 1), make_status('Joint1_R', 2),
                       make_status('lh_FFJ1', 3), make_status('Joint2_L', 0.4)])

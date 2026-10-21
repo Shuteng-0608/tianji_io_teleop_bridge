@@ -12,6 +12,7 @@ enum class ControlState
   kMonitor,
   kPreparingParameters,
   kConfiguringImpedance,
+  kConfiguringPosition,
   kWaitingForAlignment,
   kReturningToInitialPose,
   kRetreating,
@@ -32,6 +33,8 @@ inline const char * control_state_name(ControlState state)
       return "PREPARING_PARAMETERS";
     case ControlState::kConfiguringImpedance:
       return "CONFIGURING_IMPEDANCE";
+    case ControlState::kConfiguringPosition:
+      return "CONFIGURING_POSITION";
     case ControlState::kWaitingForAlignment:
       return "WAITING_FOR_ALIGNMENT";
     case ControlState::kReturningToInitialPose:
@@ -69,14 +72,14 @@ public:
   {
     state_ = ControlState::kPreparingParameters;
     aligned_frames_ = 0;
-    reason_ = "preparing impedance parameters without switching control mode";
+    reason_ = "preparing control parameters without switching control mode";
   }
 
   void mark_waiting_for_alignment()
   {
     state_ = ControlState::kWaitingForAlignment;
     aligned_frames_ = 0;
-    reason_ = "joint impedance active; waiting for fresh aligned command";
+    reason_ = "control mode confirmed; waiting for fresh aligned command";
   }
 
   bool observe_alignment(bool ready)
@@ -88,10 +91,10 @@ public:
     return aligned_frames_ >= required_alignment_frames_;
   }
 
-  void mark_configuring()
+  void mark_configuring(bool position_mode = false)
   {
-    state_ = ControlState::kConfiguringImpedance;
-    reason_ = "waiting for Marvin impedance mode confirmation";
+    state_ = position_mode ? ControlState::kConfiguringPosition : ControlState::kConfiguringImpedance;
+    reason_ = "waiting for Marvin control mode confirmation";
   }
 
   void enter_command_wait(const std::string & reason)

@@ -58,9 +58,36 @@ bool MarvinKinematicsAdapter::initialize(const std::string & config_file)
     if (FX_Robot_Tool_Rmv(serial) == FX_FALSE) {
       return fail("FX_Robot_Tool_Rmv failed for arm " + std::to_string(arm));
     }
+    if (FX_Robot_UserFrame_Rmv(serial) == FX_FALSE) {
+      return fail("FX_Robot_UserFrame_Rmv failed for arm " + std::to_string(arm));
+    }
   }
 
   initialized_ = true;
+  return true;
+}
+
+bool MarvinKinematicsAdapter::flange_rotation(std::size_t arm,
+  const std::array<double, kArmDof> & positions, std::array<std::array<double, 3>, 3> & rotation)
+{
+  if (!initialized_ || arm >= 2 ||
+    !std::all_of(positions.begin(), positions.end(), [](double x) {return std::isfinite(x);}))
+  {
+    return fail("Invalid flange FK request");
+  }
+  Vect7 q{};
+  Matrix4 transform{};
+  std::copy(positions.begin(), positions.end(), q);
+  if (!FX_Robot_Kine_FK(static_cast<FX_INT32L>(arm), q, transform)) {
+    return fail("Flange FK failed");
+  }
+  for (std::size_t i = 0; i < 3; ++i) {
+    for (std::size_t j = 0; j < 3; ++j) {
+      if (!std::isfinite(transform[i][j])) {return fail("Nonfinite flange FK");}
+      rotation[i][j] = transform[i][j];
+    }
+  }
+  last_error_.clear();
   return true;
 }
 

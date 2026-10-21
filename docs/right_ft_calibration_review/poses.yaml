@@ -1,0 +1,82 @@
+schema_version: 1
+angle_convention: sdk_absolute_degrees
+fixed_joints:
+- 1
+- 2
+- 3
+- 4
+- 5
+wrist_margin_deg: 10.0
+poses:
+- id: C01
+  role: calibration
+  j6_deg: -40
+  j7_deg: -50
+- id: C02
+  role: calibration
+  j6_deg: -40
+  j7_deg: -20
+- id: C03
+  role: calibration
+  j6_deg: -40
+  j7_deg: 20
+- id: C04
+  role: calibration
+  j6_deg: -40
+  j7_deg: 50
+- id: C05
+  role: calibration
+  j6_deg: 0
+  j7_deg: 75
+- id: C06
+  role: calibration
+  j6_deg: 0
+  j7_deg: 25
+- id: C07
+  role: calibration
+  j6_deg: 0
+  j7_deg: -25
+- id: C08
+  role: calibration
+  j6_deg: 0
+  j7_deg: -75
+- id: C09
+  role: calibration
+  j6_deg: 40
+  j7_deg: -50
+- id: C10
+  role: calibration
+  j6_deg: 40
+  j7_deg: -20
+- id: C11
+  role: calibration
+  j6_deg: 40
+  j7_deg: 20
+- id: C12
+  role: calibration
+  j6_deg: 40
+  j7_deg: 50
+- id: V01
+  role: validation
+  j6_deg: 25
+  j7_deg: 35
+- id: V02
+  role: validation
+  j6_deg: 25
+  j7_deg: -35
+- id: V03
+  role: validation
+  j6_deg: 0
+  j7_deg: -35
+- id: V04
+  role: validation
+  j6_deg: 0
+  j7_deg: 35
+- id: V05
+  role: validation
+  j6_deg: -25
+  j7_deg: 35
+- id: V06
+  role: validation
+  j6_deg: -25
+  j7_deg: -35

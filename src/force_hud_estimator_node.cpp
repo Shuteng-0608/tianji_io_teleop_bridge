@@ -28,7 +28,8 @@ class ForceHudEstimator : public rclcpp::Node
 public:
   ForceHudEstimator() : Node("tianji_force_estimator")
   {
-    const auto topic = parameter<std::string>("state_topic", "/io_teleop/joint_states");
+    const auto topic = parameter<std::string>(
+      "state_topic", "/tianji_marvin_teleop_bridge/estimated_joint_disturbance");
     const auto output = parameter<std::string>("estimate_topic", "/tianji_force_hud/estimates");
     auto config = parameter<std::string>("kinematics_config_file", "");
     const double rate = parameter<double>("estimate_rate_hz", 100.0);

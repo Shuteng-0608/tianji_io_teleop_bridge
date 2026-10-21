@@ -41,13 +41,13 @@ set(MARVIN_KINEMATICS_HEADER "${MARVIN_SDK_ROOT}/FxRobot.h")
 set(MARVIN_KINEMATICS_CONFIG "${MARVIN_SDK_ROOT}/ccs_m6_40.MvKDCfg")
 set(
   MARVIN_SDK_EXPECTED_SHA256
-  "47ab2ab6e35cf899eae3978dfb50ee219e05b10f72aedd6bc9ba6a338a8b4011"
+  "dd6b7afdbda8de3bafb6797c6f94547302ae60bf285ee8daa9762de45be636d6"
   CACHE STRING
   "Expected SHA-256 of the validated Marvin SDK shared library"
 )
 set(
   MARVIN_KINEMATICS_EXPECTED_SHA256
-  "f1512f8e440b53614b8d61adc27b217cab1b97d8bb9a80e32e00c880eee73397"
+  "0f592a4c3add356d3f48e3ccb97174750c591f2a636db686d4499812f51caefa"
   CACHE STRING
   "Expected SHA-256 of the validated Marvin kinematics shared library"
 )
@@ -113,13 +113,14 @@ add_executable(marvin_teleop_bridge_node
   src/marvin_kinematics_adapter.cpp
   src/marvin_sdk_adapter.cpp
   src/tool_configuration.cpp
+  src/ft_compensation.cpp
 )
 target_include_directories(marvin_teleop_bridge_node PRIVATE
   include
   "${MARVIN_SDK_ROOT}"
 )
 target_link_directories(marvin_teleop_bridge_node PRIVATE "${MARVIN_SDK_ROOT}")
-target_link_libraries(marvin_teleop_bridge_node MarvinSDK Kine ${TOOL_YAML_TARGET})
+target_link_libraries(marvin_teleop_bridge_node MarvinSDK Kine ${TOOL_YAML_TARGET} Eigen3::Eigen)
 ament_target_dependencies(
   marvin_teleop_bridge_node ament_index_cpp diagnostic_msgs geometry_msgs rclcpp sensor_msgs
   std_msgs std_srvs rcl_interfaces)
@@ -157,7 +158,7 @@ set_target_properties(force_hud_estimator_node PROPERTIES
 install(TARGETS force_hud_estimator_node DESTINATION lib/${PROJECT_NAME})
 install(PROGRAMS scripts/force_hud_node.py DESTINATION lib/${PROJECT_NAME}
   RENAME force_hud_node)
-install(FILES scripts/force_hud_core.py DESTINATION lib/${PROJECT_NAME})
+install(FILES scripts/force_hud_core.py scripts/force_hud_ft.py DESTINATION lib/${PROJECT_NAME})
 install(PROGRAMS scripts/alignment_dashboard.py
   DESTINATION lib/${PROJECT_NAME}
   RENAME alignment_dashboard
@@ -165,15 +166,34 @@ install(PROGRAMS scripts/alignment_dashboard.py
 install(PROGRAMS scripts/joint_limit_dashboard.py
   DESTINATION lib/${PROJECT_NAME} RENAME joint_limit_dashboard)
 install(FILES scripts/joint_limit_view.py DESTINATION lib/${PROJECT_NAME})
+install(PROGRAMS scripts/right_joint_torque_dashboard.py
+  DESTINATION lib/${PROJECT_NAME} RENAME right_joint_torque_dashboard)
+install(FILES scripts/right_joint_torque_view.py DESTINATION lib/${PROJECT_NAME})
+# Standalone end-sensor calibration: direct Python invocation also works without ROS.
+install(PROGRAMS scripts/right_ft_calibration.py
+  DESTINATION lib/${PROJECT_NAME} RENAME right_ft_calibration)
+install(PROGRAMS scripts/right_ft_zero.py
+  DESTINATION lib/${PROJECT_NAME} RENAME right_ft_zero)
+install(FILES scripts/ft_calibration_core.py scripts/ft_calibration_sdk.py scripts/ft_calibration_auto.py
+  DESTINATION lib/${PROJECT_NAME})
 install(FILES "${MARVIN_SDK_LIBRARY}" DESTINATION lib)
 install(FILES "${MARVIN_KINEMATICS_LIBRARY}" DESTINATION lib)
 install(FILES "${MARVIN_KINEMATICS_CONFIG}"
   DESTINATION share/${PROJECT_NAME}/marvin_kinematics)
-install(DIRECTORY config launch DESTINATION share/${PROJECT_NAME})
+install(DIRECTORY config launch DESTINATION share/${PROJECT_NAME}
+  PATTERN "right_ft_calibration_current.yaml" EXCLUDE)
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   find_package(ament_cmake_pytest REQUIRED)
+  ament_add_gtest(test_ft_compensation test/test_ft_compensation.cpp
+    src/ft_compensation.cpp src/marvin_kinematics_adapter.cpp)
+  target_include_directories(test_ft_compensation PRIVATE include "${MARVIN_SDK_ROOT}")
+  target_link_directories(test_ft_compensation PRIVATE "${MARVIN_SDK_ROOT}")
+  target_link_libraries(test_ft_compensation Kine ${TOOL_YAML_TARGET} Eigen3::Eigen)
+  ament_target_dependencies(test_ft_compensation sensor_msgs geometry_msgs)
+  target_compile_definitions(test_ft_compensation PRIVATE
+    FT_TEST_SOURCE="${CMAKE_CURRENT_SOURCE_DIR}" FT_TEST_MODEL="${MARVIN_KINEMATICS_CONFIG}")
   ament_add_test(test_retreat_service
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/retreat_service_probe.py"
     TIMEOUT 30 GENERATE_RESULT_FOR_RETURN_CODE_ZERO)
@@ -187,21 +207,31 @@ if(BUILD_TESTING)
     TIANJI_TEST_KINEMATICS_CONFIG="${MARVIN_KINEMATICS_CONFIG}")
   ament_add_pytest_test(test_joint_limit_view test/test_joint_limit_view.py
     APPEND_ENV PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/scripts)
+  ament_add_pytest_test(test_right_joint_torque_view test/test_right_joint_torque_view.py
+    APPEND_ENV PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/scripts)
+  ament_add_pytest_test(test_ft_calibration test/test_ft_calibration.py
+    APPEND_ENV PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/scripts)
   # Fault injection: fake all robot-control symbols, never link libMarvinSDK.
   ament_add_gtest(test_target_send test/test_target_send.cpp
+    src/ft_compensation.cpp
     src/tool_configuration.cpp
     src/retreat_check.cpp
     src/marvin_sdk_adapter.cpp src/marvin_kinematics_adapter.cpp)
   if(TARGET test_target_send)
     target_include_directories(test_target_send PRIVATE include "${MARVIN_SDK_ROOT}")
     target_link_directories(test_target_send PRIVATE "${MARVIN_SDK_ROOT}")
-    target_link_libraries(test_target_send Kine ${TOOL_YAML_TARGET})
+    target_link_libraries(test_target_send Kine ${TOOL_YAML_TARGET} Eigen3::Eigen)
+    target_compile_definitions(test_target_send PRIVATE FT_TEST_SOURCE="${CMAKE_CURRENT_SOURCE_DIR}")
     ament_target_dependencies(test_target_send
       ament_index_cpp diagnostic_msgs geometry_msgs rclcpp sensor_msgs std_msgs std_srvs rcl_interfaces)
     target_compile_options(test_target_send PRIVATE -Wall -Wextra -Wpedantic)
     set_target_properties(test_target_send PROPERTIES BUILD_RPATH "${MARVIN_SDK_ROOT}")
   endif()
   ament_add_pytest_test(test_force_hud_core test/test_force_hud_core.py
+    APPEND_ENV PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/scripts)
+  ament_add_pytest_test(test_ft_hud test/test_ft_hud.py
+    APPEND_ENV PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/scripts)
+  ament_add_pytest_test(test_right_ft_zero test/test_right_ft_zero.py
     APPEND_ENV PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/scripts)
   ament_add_gtest(test_tool_configuration test/test_tool_configuration.cpp src/tool_configuration.cpp)
   target_include_directories(test_tool_configuration PRIVATE include)
@@ -214,6 +244,12 @@ if(BUILD_TESTING)
       --duration 5
     TIMEOUT 60
     GENERATE_RESULT_FOR_RETURN_CODE_ZERO)
+  ament_add_test(test_ft_hud_pipeline
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/ft_hud_pipeline_probe.py"
+    TIMEOUT 45 GENERATE_RESULT_FOR_RETURN_CODE_ZERO)
+  ament_add_test(test_ft_insertion_hud_pipeline
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/ft_hud_pipeline_probe.py" --insertion
+    TIMEOUT 45 GENERATE_RESULT_FOR_RETURN_CODE_ZERO)
   ament_add_test(test_insertion_hud_pipeline
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/hud_pipeline_probe.py"
       --duration 5 --insertion
@@ -225,6 +261,9 @@ if(BUILD_TESTING)
     ament_target_dependencies(test_force_hud_input sensor_msgs)
   endif()
   ament_add_gtest(test_joint_model test/test_joint_model.cpp)
+  ament_add_gtest(test_joint_torque_zero test/test_joint_torque_zero.cpp)
+  target_include_directories(test_joint_torque_zero PRIVATE include)
+  ament_target_dependencies(test_joint_torque_zero sensor_msgs)
   if(TARGET test_joint_model)
     target_include_directories(test_joint_model PRIVATE include)
     ament_target_dependencies(test_joint_model sensor_msgs)

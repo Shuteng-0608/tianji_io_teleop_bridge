@@ -24,10 +24,6 @@ struct RetreatCheck
 bool retreat_forward(std::size_t arm, const ArmAngles & q, PoseMatrix & pose);
 RetreatCheck check_retreat(std::size_t arm, const ArmAngles & start_deg, double margin_rad,
   double distance_mm = 30.0, int segments = 30, bool smooth = false);
-// Uniform sample period respecting discrete joint velocity/acceleration, including
-// zero-velocity endpoints. Limits in radians/s and radians/s^2; path in degrees.
-double retreat_sample_period(const std::vector<ArmAngles> & path_deg, double duration_sec,
-  const ArmAngles & velocity_limits, const ArmAngles & acceleration_limits);
 std::string retreat_report(std::size_t arm, const RetreatCheck & result);
 }  // namespace tianji_io_teleop_bridge
 #endif

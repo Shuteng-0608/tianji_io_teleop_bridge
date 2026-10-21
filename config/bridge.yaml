@@ -1,12 +1,30 @@
 tianji_marvin_teleop_bridge:
   ros__parameters:
     robot_ip: "192.168.1.190"
+    # Right-arm six-axis sensor; recording compatibility uses JointState name + effort.
+    publish_right_ft_sensor: true
+    right_ft_sensor_topic: "/io_teleop/right/ft_sensor"
+    # REQUIRED: set this startup calibration.yaml path here or via launch right_ft_calibration_file:=...
+    right_ft_calibration_file: ""
+    right_ft_tare_directory: "/home/stw/ft_calibration_runs/teleop_tares"
+    right_ft_tare_window_sec: 5.0
+    # Measurement axes confirmed by manufacturer; no transform of the sensor origin.
+    right_ft_sensor_frame_id: "right_ft_measurement"
     # Review-only by default: neither startup nor service preview writes tool parameters.
     # Empty path explicitly selects the bundled config/tools_cfg.json snapshot.
     tools_config_file: "/home/stw/TJ_FX_ROBOT_CONTRL_SDK/MarvinPlatform_EN/tools_cfg.json"
     tool_config_dry_run: true
     tool_config_timeout_sec: 2.0
     state_topic: "/io_teleop/joint_states"
+    # Canonical effort is feedback joint torque; disturbance effort is separate.
+    estimated_joint_disturbance_topic: "/tianji_marvin_teleop_bridge/estimated_joint_disturbance"
+    # Legacy raw-disturbance topic and per-frame bias remain available for recording.
+    raw_state_topic: "/io_teleop/joint_states_raw"
+    # Manual left/right/both/zero_joint_torque; capture AFTER choosing tool and control mode.
+    joint_zero_window_sec: 1.0
+    joint_zero_max_std_nm: 0.05
+    joint_zero_max_velocity_rad_s: 0.01
+    joint_zero_max_position_range_rad: 0.005
     command_topic: "/io_teleop/joint_cmd"
     # Disabled by default: no Cartesian Wrench publishers or calculations are created.
     publish_cartesian_disturbance: false
@@ -19,7 +37,7 @@ tianji_marvin_teleop_bridge:
     # Empty selects the validated ccs_m6_40.MvKDCfg installed with this package.
     kinematics_config_file: ""
     alignment_diagnostics_topic: "~/alignment_status"
-    publish_rate_hz: 100.0
+    publish_rate_hz: 300.0
     # Control ceiling 100 Hz, paced from completion even if state publishing is raised.
     control_rate_hz: 100.0
     # Both retreat_left_10cm and retreat_right_10cm use this smooth-motion duration.
@@ -33,6 +51,8 @@ tianji_marvin_teleop_bridge:
 
     # Explicit motion permission and confirmations remain required; startup does not move.
     allow_motion: false
+    # Startup-only; affects teleoperation, NOT initial-pose/retreat services.
+    teleop_control_mode: "joint_impedance"  # joint_impedance or position (high stiffness)
     sdk_control_compatibility_confirmed: false
     tool_dynamics_confirmed: false
     enabled_arms: "both"  # Each retreat service controls ONLY its named arm.
@@ -43,10 +63,12 @@ tianji_marvin_teleop_bridge:
     initial_alignment_tolerance_rad: 0.05
     alignment_required_frames: 20
     joint_limit_tolerance_rad: 0.0001
-    # Enter a recoverable impedance hold at 0.01 rad from a URDF hard limit.
+    # IO applies URDF limits; teleoperation uses only a wider backup guard.
+    teleop_soft_limits_enabled: false
+    teleop_joint_limit_extension_rad: 0.02
+    # Inset range for initial-pose/retreat and optional legacy soft holds.
     joint_limit_safety_margin_rad: 0.01
-    # Resume only after the target is 0.03 rad inside every enabled joint limit,
-    # realigned with the held arm, and stable for 20 consecutive frames.
+    # Teleoperation recovery inset applies only with teleop_soft_limits_enabled=true.
     soft_limit_release_margin_rad: 0.03
     soft_limit_recovery_alignment_rad: 0.10
     soft_limit_recovery_frames: 20
@@ -69,6 +91,9 @@ tianji_marvin_teleop_bridge:
     initial_pose_tolerance_rad: 0.02
     initial_pose_required_frames: 20
     initial_pose_timeout_sec: 45.0
+    # Independent controller percentages for move_to_initial_pose only.
+    initial_pose_velocity_ratio: 10
+    initial_pose_acceleration_ratio: 10
 
     # Soft, low-stiffness starting candidates. They are never applied while allow_motion=false.
     # K unit: N*m/deg. D is a dimensionless damping ratio.
@@ -76,17 +101,11 @@ tianji_marvin_teleop_bridge:
     left_joint_damping:    [0.35, 0.35, 0.35, 0.30, 0.25, 0.25, 0.25]
     right_joint_stiffness: [2.5, 2.5, 2.5, 2.0, 1.5, 1.2, 1.0]
     right_joint_damping:   [0.35, 0.35, 0.35, 0.30, 0.25, 0.25, 0.25]
-    # Match the commissioned dual-arm and retreat profiles; software limits remain active.
+    # Controller percentage limits, also used during direct teleoperation.
     velocity_ratio: 50
     acceleration_ratio: 50
 
-    # Software target slew limits, independent of the Marvin percentage limits.
-    max_command_velocity_rad_s: [0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25,
-                                 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25]
-    max_command_acceleration_rad_s2: [0.50, 0.50, 0.50, 0.50, 0.50, 0.50, 0.50,
-                                      0.50, 0.50, 0.50, 0.50, 0.50, 0.50, 0.50]
-
-    expected_sdk_version: 100343013
+    expected_sdk_version: 100343014
     strict_sdk_version: true
 
     # Latest command wins: depth 1 avoids replaying stale targets after scheduling delays.

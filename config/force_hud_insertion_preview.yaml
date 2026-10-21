@@ -1,20 +1,34 @@
-# Peg-in-hole task HUD. Candidate fixed axes captured on 2026-09-10, NOT fully validated.
-# Based on user-confirmed aligned/no-contact pose, flange +Z peg axis and model gravity.
-# Provenance: docs/HOLE_REFERENCE_2026-09-10.md. Verify BOTH arms and force polarity on site.
+# Right FT sensor HUD with the original fixed hole/contact-side directions.
+# Same-stamp joint feedback + local FK rotates sensor axes into the right SDK base.
+# Hole reference: docs/HOLE_REFERENCE_2026-09-10.md; preview status remains explicit.
+# Legacy parameters: used only with launch input_source:=joint_estimate.
 tianji_force_estimator:
   ros__parameters:
-    state_topic: /io_teleop/joint_states
+    state_topic: /tianji_marvin_teleop_bridge/estimated_joint_disturbance
     estimate_topic: /tianji_force_hud/estimates
+    # Visual-feedback trial: tolerate more residual than the default HUD (0.5).
+    # Changes estimate validity/HUD visibility, not raw joint effort or robot control.
+    max_relative_residual: 0.8
     wrench_convention_confirmed: false
     left_wrench_frame: left_sdk_base
     right_wrench_frame: right_sdk_base
 
 tianji_force_hud:
   ros__parameters:
+    input_source: right_ft_sensor
+    right_ft_topic: /io_teleop/right/ft_sensor
+    right_ft_frame: right_ft_measurement
+    right_ft_display_frame: right_sdk_base
+    joint_state_topic: /io_teleop/joint_states
+    # Manufacturer-confirmed sensor/flange axis alignment. Rotation only, no origin shift.
+    right_ft_sensor_to_flange_rotation: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+    # Use bridge right/zero_ft_sensor; HUD never applies a second tare to FT data.
+    enable_display_force_zero: false
     display_mode: ring
+    display_arms: right  # Only the right arm has an end FT sensor.
     ring_semantics: contact_side  # arrow = negative external lateral force
     image_topic: /tianji_force_hud/image/compressed
-    image_rate_hz: 30.0
+    image_rate_hz: 100.0
     force_display_range: 20.0
     lateral_display_deadzone: 0.5  # Display only, NOT a contact/safety threshold.
     axial_display_deadzone: 0.5
@@ -25,7 +39,7 @@ tianji_force_hud:
     # Base-alignment axes must be unit, orthogonal and RIGHT-HANDED.
     # Then task_yaw rotates task axes about aligned +Z (degrees); never live wrist yaw.
     left_direction_mapping_confirmed: false
-    left_direction_preview: true
+    left_direction_preview: false
     left_direction_frame: left_sdk_base
     left_screen_right_axis: [-0.010579554353, 0.0, -0.999944034949]
     left_screen_up_axis: [-0.007500215846, -0.999971869837, 0.000079353382]

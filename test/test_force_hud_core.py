@@ -8,6 +8,28 @@ import pytest
 from force_hud_core import AXES, HudModel, RingMapping, render_hud
 
 
+@pytest.mark.parametrize("mode", ["ring", "bars"])
+@pytest.mark.parametrize("side,hidden", [("right", "left"), ("left", "right")])
+def test_single_arm_panel_ignores_hidden_arm_and_preserves_model(mode, side, hidden):
+    model = HudModel()
+    model.ingest(report(), 10 * 10**9, 1.0)
+    image = render_hud(model, 0, display_mode=mode, display_arms=side)
+    assert image.shape == (720, 1280, 3)
+    before = model.arms[side].filtered.copy()
+    model.arms[hidden].valid = False
+    model.arms[hidden].message = "HIDDEN ARM INVALID"
+    np.testing.assert_array_equal(
+        image, render_hud(model, 0, display_mode=mode, display_arms=side))
+    np.testing.assert_array_equal(model.arms[side].filtered, before)
+    model.arms[side].valid = False
+    assert not np.array_equal(image, render_hud(model, 0, display_mode=mode, display_arms=side))
+
+
+def test_invalid_display_arm_rejected():
+    with pytest.raises(ValueError, match="display_arms"):
+        render_hud(HudModel(), 0, display_arms="none")
+
+
 def report(stamp=10.0, left=1.0, right=2.0, level=1):
     statuses = []
     for side, value in (("left", left), ("right", right)):

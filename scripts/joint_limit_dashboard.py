@@ -28,7 +28,7 @@ class LimitWindow:
                       f'{min(570, root.winfo_screenheight()-100)}')
         root.minsize(520, 320)
         self.legend = ttk.Label(root, padding=10, text=(
-            '● 实机    ▼ 有效目标    红线：软限位    绿区：解除范围    单位 °'
+            '● 实机    ▼ 有效目标    红线：桥接保护边界    绿区：允许/恢复范围    单位 °'
         ))
         self.legend.pack(fill='x')
         body = ttk.Frame(root)
@@ -86,11 +86,12 @@ class LimitWindow:
         left, right, cy = x+112, x+width-14, y+22
         c.create_rectangle(left, cy-5, right, cy+5, fill='#e4e8ee', outline='')
         if row.ranges_valid():
-            text(left-x, 38, f'{row.hard[0]:+.2f}°', COLORS['stale'])
-            c.create_text(right, y+38, text=f'{row.hard[1]:+.2f}°',
+            bounds = row.display_bounds()
+            text(left-x, 38, f'{bounds[0]:+.2f}°', COLORS['stale'])
+            c.create_text(right, y+38, text=f'{bounds[1]:+.2f}°',
                           fill=COLORS['stale'], anchor='ne', font=('sans-serif', -13))
             def px(value):
-                ratio = (value-row.hard[0]) / (row.hard[1]-row.hard[0])
+                ratio = (value-bounds[0]) / (bounds[1]-bounds[0])
                 return left + max(0, min(1, ratio)) * (right-left)
             c.create_rectangle(px(row.release[0]), cy-4, px(row.release[1]), cy+4,
                                fill='#b8dfc7' if fb else '#d5d9df', outline='')

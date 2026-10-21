@@ -30,6 +30,8 @@ class JointView:
     release: tuple
     allowed: tuple
     tolerance: float
+    policy: str = 'soft'
+    guard: tuple = (math.nan, math.nan)
 
     @classmethod
     def from_values(cls, name, values):
@@ -39,11 +41,22 @@ class JointView:
         return cls(name, values.get('enabled') == 'true',
                    degree(values, 'feedback_rad'), degree(values, 'command_rad'),
                    bounds('hard'), bounds('soft'), bounds('release'), bounds('safe'),
-                   degree(values, 'tolerance_rad'))
+                   degree(values, 'tolerance_rad'), values.get('joint_limit_policy', 'soft'),
+                   bounds('guard'))
+
+    def display_bounds(self):
+        return self.guard if self.policy == 'backup' else self.hard
 
     def ranges_valid(self):
         ranges = (self.hard, self.soft, self.release, self.allowed)
         if not all(math.isfinite(v) for pair in ranges for v in pair):
+            return False
+        if self.policy == 'backup':
+            if not all(math.isfinite(v) for v in self.guard):
+                return False
+            return (self.guard[0] <= self.hard[0] < self.hard[1] <= self.guard[1] and
+                    self.soft == self.release == self.allowed == self.guard)
+        if self.policy != 'soft':
             return False
         return (self.hard[0] <= self.soft[0] <= self.release[0] <
                 self.release[1] <= self.soft[1] <= self.hard[1] and

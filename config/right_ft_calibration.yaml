@@ -1,0 +1,54 @@
+schema_version: 1
+sdk_root: /home/stw/TJ_FX_ROBOT_CONTRL_SDK
+model_file: /home/stw/TJ_FX_ROBOT_CONTRL_SDK/CommonConfig/ccs_m6_40.MvKDCfg
+robot_ip: 192.168.1.190
+# Independent of ROS. Only explicit `auto --connect` sends motion commands.
+automatic:
+  # Operator-approved ratios, relative to controller joint limits (not deg/s).
+  velocity_percent: 10
+  acceleration_percent: 10
+  preflight_s: 1.0
+  mode_timeout_s: 5.0
+  command_timeout_s: 1.0
+  move_timeout_s: 60.0
+  stop_timeout_s: 3.0
+  # Conservative rejection if every raw sensor channel stays exactly identical.
+  sensor_stale_s: 2.0
+sampling:
+  settle_s: 1.0
+  duration_s: 2.0
+  timeout_s: 30.0
+  poll_hz: 400.0
+  fresh_timeout_s: 0.2
+  min_samples: 200
+  target_tolerance_deg: 1.0
+  base_tolerance_deg: 0.5
+  max_velocity_deg_s: 0.2
+  max_position_span_deg: 0.15
+  max_force_std_N: 0.10
+  max_torque_std_Nm: 0.005
+sensor:
+  # Sampling can run before these are known; fitting requires confirmation.
+  axes_confirmed: false
+  frame_id: ''
+  # v_flange = R_flange_sensor @ v_sensor.
+  # Confirmed by operator 2026-10-14: Xs=+Zf, Ys=-Yf, hence Zs=+Xf (right-handed).
+  # axes_confirmed also requires the measurement/sign convention below to be checked.
+  R_flange_sensor:
+    - [0.0, 0.0, 1.0]
+    - [0.0, -1.0, 0.0]
+    - [1.0, 0.0, 0.0]
+  # Convert raw sensor channels into the convention F = m*g + bias,
+  # tau = com x (m*g) + bias. Signs must be verified separately for F and tau.
+  force_sign: null
+  torque_sign: null
+gravity:
+  base_direction_confirmed: false
+  # null uses the model's right-arm base vector [0, -9.81, 0].
+  # Override if the actual robot-base mounting differs.
+  base_m_s2: null
+fitting:
+  max_condition: 30.0
+  # Initial engineering acceptance criteria, not manufacturer specifications.
+  max_validation_force_rms_N: 0.20
+  max_validation_torque_rms_Nm: 0.01

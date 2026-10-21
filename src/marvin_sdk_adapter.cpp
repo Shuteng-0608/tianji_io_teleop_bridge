@@ -38,6 +38,15 @@ bool MarvinSdkAdapter::read_feedback(DCSS & feedback)
   return true;
 }
 
+bool MarvinSdkAdapter::select_right_ft_sensor()
+{
+  if (!connected_) {return fail("right FT channel requested while SDK is disconnected");}
+  if (!OnSetUserSpcfData_B(216)) {return fail("right FT channel 216 selection failed");}
+  // The node must also verify the channel echo before interpreting the reused fields.
+  last_error_.clear();
+  return true;
+}
+
 bool MarvinSdkAdapter::configure_joint_impedance_parameters(
   EnabledArms arms,
   const JointImpedanceSettings & settings)
@@ -111,6 +120,48 @@ bool MarvinSdkAdapter::enter_joint_impedance_mode(EnabledArms arms)
   if (!OnSetSend()) {
     discard_pending_packet();
     return fail("OnSetSend failed for impedance mode packet");
+  }
+  return true;
+}
+
+bool MarvinSdkAdapter::configure_position_parameters(
+  EnabledArms arms, int velocity_ratio, int acceleration_ratio)
+{
+  if (!connected_ || arms == EnabledArms::kNone ||
+    velocity_ratio < 1 || velocity_ratio > 100 || acceleration_ratio < 1 || acceleration_ratio > 100)
+  {
+    return fail("position parameters require connection, enabled arms and ratios in [1,100]");
+  }
+  if (!OnClearSet()) {return fail("OnClearSet failed before position parameter packet");}
+  if ((left_enabled(arms) && !OnSetJointLmt_A(velocity_ratio, acceleration_ratio)) ||
+    (right_enabled(arms) && !OnSetJointLmt_B(velocity_ratio, acceleration_ratio)))
+  {
+    discard_pending_packet();
+    return fail("failed to stage position speed parameters");
+  }
+  if (!OnSetSend()) {
+    discard_pending_packet();
+    return fail("OnSetSend failed for position parameter packet");
+  }
+  return true;
+}
+
+bool MarvinSdkAdapter::enter_position_mode(EnabledArms arms)
+{
+  // The node checks fresh stationary feedback before this pure mode packet.
+  if (!connected_ || arms == EnabledArms::kNone) {
+    return fail("position mode requires connection and enabled arms");
+  }
+  if (!OnClearSet()) {return fail("OnClearSet failed before position mode packet");}
+  if ((left_enabled(arms) && !OnSetTargetState_A(ARM_STATE_POSITION)) ||
+    (right_enabled(arms) && !OnSetTargetState_B(ARM_STATE_POSITION)))
+  {
+    discard_pending_packet();
+    return fail("failed to stage position mode");
+  }
+  if (!OnSetSend()) {
+    discard_pending_packet();
+    return fail("OnSetSend failed for position mode packet");
   }
   return true;
 }
