@@ -2,7 +2,12 @@
 
 日常操作只需两条命令：无工具时运行 `right_ft_zero.py`，安装工具后运行
 `right_ft_calibration.py auto`。不需要目录变量、复制配置或填写 zero-note。
-两个命令可以在不同终端执行，不依赖上一次终端的环境变量。
+两个命令可以在不同终端执行，不依赖上一次终端的目录变量。
+使用 Conda 时先 `conda activate tianji`，安装 `numpy`、`PyYAML`；离线测试另需 `pytest`。
+独立清零和标定无需 ROS。SDK 默认位于当前用户的 `~/TJ_FX_ROBOT_CONTRL_SDK`，
+模型路径中的 `~` 自动展开，固定结果路径相对于配置文件目录解析。
+迁移到其他用户名或仓库位置不再需要修改这三个默认路径；下面桥接/HUD 部分的
+`/home/stw` 是原 PC 的 ROS 工作区示例，新 PC 使用时改为自己的工作区路径。
 
 ## 1 无工具 SDK 清零
 
@@ -10,7 +15,7 @@
 处于 IDLE 或 Position 模式。断开天机界面、遥操作桥接及其他 SDK 客户端。
 
 ```bash
-/usr/bin/python3 -u /home/stw/tianji_ws/src/tianji_io_teleop_bridge/scripts/right_ft_zero.py
+python -u "$HOME/tianji_ws/src/tianji_io_teleop_bridge/scripts/right_ft_zero.py"
 ```
 
 执行命令即连接右臂并开始无工具清零，无需额外参数或交互确认。
@@ -34,7 +39,7 @@
 保持工具、线缆和环境与审核时一致，其他 SDK 客户端保持断开。
 
 ```bash
-/usr/bin/python3 -u /home/stw/tianji_ws/src/tianji_io_teleop_bridge/scripts/right_ft_calibration.py auto
+python -u "$HOME/tianji_ws/src/tianji_io_teleop_bridge/scripts/right_ft_calibration.py" auto
 ```
 
 执行 `auto` 即启动已审核流程，不再要求 `--connect`、`--poses-reviewed`、

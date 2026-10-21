@@ -31,9 +31,15 @@ def rotation(value, name='rotation'):
 
 
 def read_yaml(path):
-    result = yaml.safe_load(Path(path).read_text())
+    path = Path(path).expanduser().resolve()
+    result = yaml.safe_load(path.read_text())
     if not isinstance(result, dict):
         raise ValueError(f'{path}: expected YAML mapping')
+    # Home paths follow the current user; relative paths follow this YAML, not cwd.
+    for key in ('sdk_root', 'model_file', 'current_calibration_file'):
+        if result.get(key):
+            value = Path(result[key]).expanduser()
+            result[key] = str((value if value.is_absolute() else path.parent / value).resolve())
     return result
 
 
@@ -64,7 +70,7 @@ class Model:
     @classmethod
     def load(cls, path):
         # Same CSV layout as SDK LOADMvCfg. Read only the right-arm block.
-        path = Path(path).resolve()
+        path = Path(path).expanduser().resolve()
         digest = sha256(path)
         if digest != MODEL_SHA256:
             raise ValueError('Unverified kinematics model hash; review model/limits before use')

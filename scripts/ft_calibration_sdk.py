@@ -22,7 +22,7 @@ WRAPPER_HASH = 'fae947726ca67f9b5ea644710e12154c508015bc4534db9803048d323fc11a3d
 
 
 def checked_file(root, relative, digest):
-    path = Path(root) / relative
+    path = Path(root).expanduser() / relative
     if sha256(path) != digest:
         raise ValueError(f'Unverified SDK file: {path}')
     return path

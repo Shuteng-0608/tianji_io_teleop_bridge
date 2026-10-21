@@ -885,3 +885,20 @@ def test_auto_still_accepts_explicit_output_and_note(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, 'automatic', fake_automatic)
     assert cli.main(['auto', '--output', str(tmp_path / 'custom'),
                      '--zero-note', 'custom note', '--current-file', str(tmp_path / 'current.yaml')]) == 0
+
+
+def test_config_paths_follow_home_and_yaml_directory(monkeypatch, tmp_path):
+    home = tmp_path / 'new-user'
+    monkeypatch.setenv('HOME', str(home))
+    folder = tmp_path / 'different-checkout' / 'config'
+    folder.mkdir(parents=True)
+    path = folder / 'robot.yaml'
+    core.write_yaml(path, {'sdk_root': '~/TJ_FX_ROBOT_CONTRL_SDK',
+                          'model_file': '~/TJ_FX_ROBOT_CONTRL_SDK/CommonConfig/model.cfg',
+                          'current_calibration_file': 'right_ft_calibration_current.yaml'})
+    monkeypatch.chdir(tmp_path)
+    config = core.read_yaml(path)
+    assert config['sdk_root'] == str(home / 'TJ_FX_ROBOT_CONTRL_SDK')
+    assert config['model_file'] == str(home / 'TJ_FX_ROBOT_CONTRL_SDK/CommonConfig/model.cfg')
+    assert config['current_calibration_file'] == str(folder / 'right_ft_calibration_current.yaml')
+    assert core.read_yaml(POSES)['poses'][0]['id'] == 'C01'

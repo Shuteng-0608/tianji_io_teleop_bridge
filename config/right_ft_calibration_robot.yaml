@@ -1,11 +1,12 @@
 # Reusable configuration for the current right-arm installation; no saved mass, COM or zero bias.
 # Loaded directly by auto. Operator performs bare-sensor zero before installing the tool.
 schema_version: 1
-sdk_root: /home/stw/TJ_FX_ROBOT_CONTRL_SDK
-model_file: /home/stw/TJ_FX_ROBOT_CONTRL_SDK/CommonConfig/ccs_m6_40.MvKDCfg
+sdk_root: ~/TJ_FX_ROBOT_CONTRL_SDK
+model_file: ~/TJ_FX_ROBOT_CONTRL_SDK/CommonConfig/ccs_m6_40.MvKDCfg
 robot_ip: 192.168.1.190
 # Successful auto calibration replaces this local result beside the bridge configs.
-current_calibration_file: /home/stw/tianji_ws/src/tianji_io_teleop_bridge/config/right_ft_calibration_current.yaml
+# Relative to this YAML directory, independent of username and checkout location.
+current_calibration_file: right_ft_calibration_current.yaml
 automatic:
   velocity_percent: 10
   acceleration_percent: 10

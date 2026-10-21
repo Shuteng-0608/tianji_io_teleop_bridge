@@ -149,7 +149,7 @@ def run_zero(args, feedback_factory=None):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__ +
         ' Running this command connects and zeros the bare sensor; keep the arm at zero, stationary and contact-free.')
-    parser.add_argument('--sdk-root', default='/home/stw/TJ_FX_ROBOT_CONTRL_SDK')
+    parser.add_argument('--sdk-root', default=str(Path.home() / 'TJ_FX_ROBOT_CONTRL_SDK'))
     parser.add_argument('--robot-ip', default='192.168.1.190')
     parser.add_argument('--connect', action='store_true', default=True, help='compatibility option; connection is enabled by default')
     parser.add_argument('--no-tool', action='store_true', default=True, help='compatibility option; this command is for a bare sensor only')
