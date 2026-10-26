@@ -19,12 +19,22 @@ from ft_calibration_core import finite_array, rotation, sha256
 CONTROL_HASH = 'dd6b7afdbda8de3bafb6797c6f94547302ae60bf285ee8daa9762de45be636d6'
 KINEMATICS_HASH = '0f592a4c3add356d3f48e3ccb97174750c591f2a636db686d4499812f51caefa'
 WRAPPER_HASH = 'fae947726ca67f9b5ea644710e12154c508015bc4534db9803048d323fc11a3d'
+# Reviewed 2026-10-26: version 100343014, same wrapper/DCSS and model.
+# Control changes affect response waiting/timeouts; Kine adds dual-arm planning,
+# leaving the FK entry points used here unchanged. Keep the original PC supported.
+CONTROL_HASHES = frozenset((CONTROL_HASH,
+    'ac80fb5e30963bbede64bc5d0e6d866cb33e2b753de632acfb62e85ae1256492'))
+KINEMATICS_HASHES = frozenset((KINEMATICS_HASH,
+    '011e38a2a2346ea065c767b2a4d8b85e18de046032af968cf07471d3ec6e927f'))
 
 
 def checked_file(root, relative, digest):
     path = Path(root).expanduser() / relative
-    if sha256(path) != digest:
-        raise ValueError(f'Unverified SDK file: {path}')
+    actual = sha256(path)
+    allowed = {digest} if isinstance(digest, str) else digest
+    if actual not in allowed:
+        raise ValueError(f'Unverified SDK file: {path} (SHA-256: {actual}); '
+                         'SDK update requires compatibility review')
     return path
 
 
@@ -32,9 +42,9 @@ class Kinematics:
     """Local mathematical library only; no controller connection."""
     def __init__(self, root, model, *, library_path=None):
         # The HUD uses the installed mathematical library, independently of the SDK checkout.
-        path = (checked_file(root, 'DEMO_C++/libKine.so', KINEMATICS_HASH)
+        path = (checked_file(root, 'DEMO_C++/libKine.so', KINEMATICS_HASHES)
                 if library_path is None else Path(library_path))
-        if sha256(path) != KINEMATICS_HASH:
+        if sha256(path) not in KINEMATICS_HASHES:
             raise ValueError(f'Unverified kinematics library: {path}')
         self.lib = C.CDLL(str(path))
         self.lib.FX_LOG_SWITCH.argtypes = [C.c_int32]
@@ -99,7 +109,7 @@ class Feedback:
     def __enter__(self):
         # Load DCSS declarations without constructing the SDK's high-level robot class.
         wrapper = checked_file(self.root, 'SDK_PYTHON/fx_robot.py', WRAPPER_HASH)
-        control = checked_file(self.root, 'SDK_PYTHON/libMarvinSDK.so', CONTROL_HASH)
+        control = checked_file(self.root, 'SDK_PYTHON/libMarvinSDK.so', CONTROL_HASHES)
         spec = importlib.util.spec_from_file_location('_ft_sdk_structures', wrapper)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)

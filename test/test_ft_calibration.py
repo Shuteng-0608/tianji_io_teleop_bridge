@@ -902,3 +902,18 @@ def test_config_paths_follow_home_and_yaml_directory(monkeypatch, tmp_path):
     assert config['model_file'] == str(home / 'TJ_FX_ROBOT_CONTRL_SDK/CommonConfig/model.cfg')
     assert config['current_calibration_file'] == str(folder / 'right_ft_calibration_current.yaml')
     assert core.read_yaml(POSES)['poses'][0]['id'] == 'C01'
+
+
+@pytest.mark.parametrize('kind', ['control', 'kinematics'])
+def test_reviewed_sdk_builds_accepted_unknown_build_rejected(tmp_path, monkeypatch, kind):
+    allowed = sdk.CONTROL_HASHES if kind == 'control' else sdk.KINEMATICS_HASHES
+    relative = 'SDK_PYTHON/libMarvinSDK.so' if kind == 'control' else 'DEMO_C++/libKine.so'
+    path = tmp_path / relative
+    for digest in allowed:
+        monkeypatch.setattr(sdk, 'sha256', lambda _, value=digest: value)
+        assert sdk.checked_file(tmp_path, relative, allowed) == path
+    monkeypatch.setattr(sdk, 'sha256', lambda _: '0' * 64)
+    with pytest.raises(ValueError, match='compatibility review'):
+        sdk.checked_file(tmp_path, relative, allowed)
+    with pytest.raises(ValueError):
+        sdk.checked_file(tmp_path, relative, sdk.WRAPPER_HASH)
